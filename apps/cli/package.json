@@ -1,0 +1,30 @@
+{
+  "name": "@nexgen/canvas-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "nexgen-canvas": "dist/cli.js"
+  },
+  "scripts": {
+    "predev": "npm run -w @nexgen/canvas-sdk build",
+    "dev": "tsx src/cli.ts",
+    "prebuild": "npm run -w @nexgen/canvas-sdk build",
+    "build": "tsc -p tsconfig.json",
+    "prestart": "npm run -w @nexgen/canvas-sdk build",
+    "start": "node dist/cli.js",
+    "lint": "node -e \"console.log('Add eslint later if needed')\""
+  },
+  "dependencies": {
+    "@nexgen/canvas-sdk": "file:../../packages/canvas-sdk",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.4.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

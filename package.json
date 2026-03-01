@@ -1,26 +1,18 @@
 {
-  "name": "nexgen-canvas-pipeline",
+  "name": "nexgen-canvas-workspace",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "bin": {
-    "nexgen-canvas": "dist/cli.js"
-  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "agent"
+  ],
   "scripts": {
-    "dev": "tsx src/cli.ts",
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/cli.js",
-    "lint": "node -e \"console.log('Add eslint later if needed')\""
-  },
-  "dependencies": {
-    "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1",
-    "commander": "^12.1.0",
-    "dotenv": "^16.4.5"
-  },
-  "devDependencies": {
-    "tsx": "^4.19.2",
-    "typescript": "^5.6.3",
-    "wrangler": "^4.59.2"
+    "dev": "node scripts/dev-cli.mjs",
+    "plugins:dev": "npm run -w @nexgen/plugins-runner dev --",
+    "build": "npm run -w @nexgen/canvas-sdk build && npm run -w @nexgen/canvas-cli build && npm run -w @nexgen/plugins-runner build",
+    "start": "npm run -w @nexgen/canvas-sdk build && node apps/cli/dist/cli.js",
+    "plugins:start": "npm run -w @nexgen/plugins-runner start --",
+    "lint": "npm run -ws --if-present lint"
   }
 }

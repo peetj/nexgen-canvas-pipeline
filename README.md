@@ -15,14 +15,26 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
    npm install
 
 ## Repo layout
-- `config/nexgen-canvas-pipeline.config.json`: central config for quiz/session defaults
-- `src/quiz`: quiz automation logic (schema validation, mapping, and CLI wiring)
-- `src/session`: session setup automation (module headers)
-- `src/agent/quiz`: quiz agent client used by the CLI
+- `apps/cli`: Canvas automation CLI app (quiz/session/teacher-notes commands)
+- `apps/plugins-runner`: plugin runtime app for reusable Canvas plugins
+- `apps/cli/config/nexgen-canvas-pipeline.config.json`: CLI config defaults
+- `apps/cli/examples`: example quiz payloads
+- `packages/canvas-sdk`: shared Canvas API client and types
 - `agent/src/quiz`: Cloudflare quiz agent worker
 
+## Command Summary
+### Main CLI (`apps/cli/src/cli.ts`)
+- `create`: Creates a Canvas Classic Quiz either from a Nexgen JSON file or generated agent content. It validates the quiz structure and uploads questions to the selected course.
+- `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
+- `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
+- `teacher-notes`: Builds a canonical Teacher Notes page from existing session content. In live mode it updates module placement; in draft mode it prepares a safe draft page without changing live placement.
+
+### Plugins Runner (`apps/plugins-runner/src/cli.ts`)
+- `list`: Shows available reusable Canvas workflow plugins that can be executed by the runner.
+- `run`: Executes a selected plugin against a target course with optional plugin arguments for scoped behavior.
+
 ## Config
-All non-secret settings live in `config/nexgen-canvas-pipeline.config.json`. For session headers, edit
+All non-secret settings live in `apps/cli/config/nexgen-canvas-pipeline.config.json`. For session headers, edit
 `sessions.headersTemplate`. Use `{nn}` for a zero-padded session number (e.g. 01) and `{n}` for
 the raw session number (e.g. 1).
 
@@ -47,9 +59,11 @@ gh auth login
 Use either invocation style:
 
 1. Direct (most reliable across shells):
-`npx tsx src/cli.ts <command> [options]`
+`npx tsx apps/cli/src/cli.ts <command> [options]`
+Run once before direct mode (or whenever `packages/canvas-sdk/src` changes):
+`npm run -w @nexgen/canvas-sdk build`
 2. npm script wrapper:
-`npm run dev -- <command> [options]`
+`npm run dev -- <command> -- [options]`
 
 ### Command: `create`
 Create a quiz in Canvas from a JSON file or from an agent prompt.
@@ -65,9 +79,12 @@ Rules:
 
 Examples:
 ```bash
-npx tsx src/cli.ts create --from-file examples/nexgen-quiz.example.json --dry-run
-npx tsx src/cli.ts create --from-file examples/nexgen-quiz.example.json
-npx tsx src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --course-id 12345 --dry-run
+npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
+npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.example.json
+npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --course-id 12345 --dry-run
+
+# npm wrapper form
+npm run dev -- create -- --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
 ```
 
 ### Command: `session-headers`
@@ -81,7 +98,38 @@ Options:
 
 Example:
 ```bash
-npx tsx src/cli.ts session-headers --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
+npx tsx apps/cli/src/cli.ts session-headers --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
+
+# npm wrapper form
+npm run dev -- session-headers -- --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
+```
+
+### Command: `clone-survey`
+Clone an existing quiz/survey into multiple session-numbered copies.
+
+Options:
+- `--source-title <title>`: Required. Exact source quiz title to clone.
+- `--title-template <template>`: Optional. Use `{nn}` (zero-padded) and/or `{n}` (raw). If omitted, derived from source title.
+- `--range <start-end>`: Inclusive session range (for example, `2-7`).
+- `--sessions <numbers>`: Comma-separated sessions (for example, `2,3,5`).
+- `--pad <number>`: Width for `{nn}` padding. Default `2`.
+- `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
+- `--skip-existing`: Skip generated titles that already exist.
+- `--dry-run`: Preview only.
+
+Rules:
+- Provide exactly one of `--range` or `--sessions`.
+
+Examples:
+```bash
+# Copy Session-01 survey to Session-02..07
+npx tsx apps/cli/src/cli.ts clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --range 2-7 --dry-run
+
+# Custom template and explicit sessions
+npx tsx apps/cli/src/cli.ts clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --title-template "Weekly-Check-In-Session-{nn}" --sessions 2,3,4,5,6,7
+
+# npm wrapper form
+npm run dev -- clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --range 2-7
 ```
 
 ### Command: `teacher-notes`
@@ -107,11 +155,30 @@ Draft mode behavior:
 Examples:
 ```bash
 # Draft iteration
-npx tsx src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft
+npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft
 
 # Draft preview only
-npx tsx src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
+npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
 
 # Live publish (after draft approval)
-npx tsx src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad"
+npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad"
+
+# npm wrapper form
+npm run dev -- teacher-notes -- --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
+```
+
+### Plugins Runner
+Use this for reusable, composable Canvas workflows implemented as plugins.
+
+Direct invocation:
+```bash
+npx tsx apps/plugins-runner/src/cli.ts list
+npx tsx apps/plugins-runner/src/cli.ts run --plugin module-overview --course-id 21
+npx tsx apps/plugins-runner/src/cli.ts run --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
+```
+
+Workspace script invocation:
+```bash
+npm run plugins:dev -- list
+npm run plugins:dev -- run --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
 ```

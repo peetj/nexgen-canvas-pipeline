@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type PipelineConfig = {
   quiz: {
@@ -29,6 +30,7 @@ const DEFAULT_CONFIG: PipelineConfig = {
     sessionNumberPad: 2,
     headersTemplate: [
       "Teachers Notes",
+      "What we are doing Today",
       "QUIZ",
       "Session {nn}: Task A",
       "Session {nn}: Task B",
@@ -38,7 +40,7 @@ const DEFAULT_CONFIG: PipelineConfig = {
 };
 
 function mergeConfig(input: Partial<PipelineConfig>): PipelineConfig {
-  const quizDefaults = input.quiz?.defaults ?? {};
+  const quizDefaults: Partial<PipelineConfig["quiz"]["defaults"]> = input.quiz?.defaults ?? {};
   return {
     quiz: {
       schemaVersion: input.quiz?.schemaVersion ?? DEFAULT_CONFIG.quiz.schemaVersion,
@@ -58,16 +60,28 @@ function mergeConfig(input: Partial<PipelineConfig>): PipelineConfig {
 }
 
 export async function loadConfig(): Promise<PipelineConfig> {
-  const configPath = path.resolve(process.cwd(), "config", "nexgen-canvas-pipeline.config.json");
-  try {
-    const raw = await fs.readFile(configPath, "utf8");
-    const parsed = JSON.parse(raw) as Partial<PipelineConfig>;
-    return mergeConfig(parsed ?? {});
-  } catch (err) {
-    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
-    if (code === "ENOENT") {
-      return DEFAULT_CONFIG;
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const appRoot = path.resolve(moduleDir, "..");
+  const workspaceRoot = path.resolve(appRoot, "..", "..");
+  const candidates = [
+    path.resolve(process.cwd(), "config", "nexgen-canvas-pipeline.config.json"),
+    path.resolve(appRoot, "config", "nexgen-canvas-pipeline.config.json"),
+    path.resolve(workspaceRoot, "config", "nexgen-canvas-pipeline.config.json")
+  ];
+
+  for (const configPath of candidates) {
+    try {
+      const raw = await fs.readFile(configPath, "utf8");
+      const parsed = JSON.parse(raw) as Partial<PipelineConfig>;
+      return mergeConfig(parsed ?? {});
+    } catch (err) {
+      const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+      if (code === "ENOENT") {
+        continue;
+      }
+      throw err;
     }
-    throw err;
   }
+
+  return DEFAULT_CONFIG;
 }

@@ -1,5 +1,3 @@
-import { env } from "../env.js";
-
 type FetchOptions = {
   method?: string;
   path: string;
@@ -27,11 +25,46 @@ export type CanvasPage = {
   published?: boolean;
 };
 
+export type CanvasQuizSummary = {
+  id: number;
+  title: string;
+  quiz_type?: string;
+  published?: boolean;
+  html_url?: string;
+};
+
+export type CanvasQuiz = CanvasQuizSummary & {
+  description?: string;
+  assignment_group_id?: number;
+  time_limit?: number;
+  allowed_attempts?: number;
+  shuffle_answers?: boolean;
+  show_correct_answers?: boolean;
+  scoring_policy?: string;
+  one_question_at_a_time?: boolean;
+  cant_go_back?: boolean;
+  access_code?: string;
+  ip_filter?: string;
+  due_at?: string;
+  lock_at?: string;
+  unlock_at?: string;
+  published_at?: string;
+  lock_questions_after_answering?: boolean;
+  hide_results?: string;
+};
+
+export type CanvasQuizQuestion = {
+  id?: number;
+  quiz_id?: number;
+  position?: number;
+  [key: string]: unknown;
+};
+
 export class CanvasClient {
   private baseUrl: string;
   private token: string;
 
-  constructor(baseUrl = env.canvasBaseUrl, token = env.canvasApiToken) {
+  constructor(baseUrl: string, token: string) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.token = token;
   }
@@ -41,7 +74,7 @@ export class CanvasClient {
     const res = await fetch(url, {
       method: opts.method ?? "GET",
       headers: {
-        "Authorization": `Bearer ${this.token}`,
+        Authorization: `Bearer ${this.token}`,
         "Content-Type": "application/json"
       },
       body: opts.body ? JSON.stringify(opts.body) : undefined
@@ -49,23 +82,43 @@ export class CanvasClient {
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Canvas API error ${res.status} ${res.statusText} for ${opts.method ?? "GET"} ${opts.path}\n${text}`);
+      throw new Error(
+        `Canvas API error ${res.status} ${res.statusText} for ${opts.method ?? "GET"} ${opts.path}\n${text}`
+      );
     }
 
     return (await res.json()) as T;
   }
 
-  async createQuiz(courseId: number, quiz: {
-    title: string;
-    description?: string;
-    published?: boolean;
-    time_limit?: number;
-    allowed_attempts?: number;
-  }): Promise<{ id: number; html_url?: string; title: string }> {
+  async createQuiz(
+    courseId: number,
+    quiz: {
+      title: string;
+      description?: string;
+      quiz_type?: string;
+      published?: boolean;
+      time_limit?: number;
+      allowed_attempts?: number;
+      assignment_group_id?: number;
+      shuffle_answers?: boolean;
+      show_correct_answers?: boolean;
+      scoring_policy?: string;
+      one_question_at_a_time?: boolean;
+      cant_go_back?: boolean;
+      access_code?: string;
+      ip_filter?: string;
+      due_at?: string;
+      lock_at?: string;
+      unlock_at?: string;
+      lock_questions_after_answering?: boolean;
+      hide_results?: string;
+    }
+  ): Promise<{ id: number; html_url?: string; title: string }> {
+    const quizType = quiz.quiz_type ?? "assignment";
     return this.request({
       method: "POST",
       path: `/api/v1/courses/${courseId}/quizzes`,
-      body: { quiz: { quiz_type: "assignment", ...quiz } }
+      body: { quiz: { ...quiz, quiz_type: quizType } }
     });
   }
 
@@ -77,11 +130,40 @@ export class CanvasClient {
     });
   }
 
-  async updateQuiz(courseId: number, quizId: number, quiz: { published?: boolean }): Promise<{ id: number; published?: boolean; question_count?: number }> {
+  async updateQuiz(
+    courseId: number,
+    quizId: number,
+    quiz: { published?: boolean }
+  ): Promise<{ id: number; published?: boolean; question_count?: number }> {
     return this.request({
       method: "PUT",
       path: `/api/v1/courses/${courseId}/quizzes/${quizId}`,
       body: { quiz }
+    });
+  }
+
+  async listQuizzes(courseId: number, searchTerm?: string): Promise<CanvasQuizSummary[]> {
+    const params = new URLSearchParams({ per_page: "100" });
+    if (searchTerm && searchTerm.trim().length > 0) {
+      params.set("search_term", searchTerm.trim());
+    }
+    return this.request({
+      method: "GET",
+      path: `/api/v1/courses/${courseId}/quizzes?${params.toString()}`
+    });
+  }
+
+  async getQuiz(courseId: number, quizId: number): Promise<CanvasQuiz> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/courses/${courseId}/quizzes/${quizId}`
+    });
+  }
+
+  async listQuizQuestions(courseId: number, quizId: number): Promise<CanvasQuizQuestion[]> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/courses/${courseId}/quizzes/${quizId}/questions?per_page=100`
     });
   }
 
