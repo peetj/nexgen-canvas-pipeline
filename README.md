@@ -22,6 +22,17 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 - `packages/canvas-sdk`: shared Canvas API client and types
 - `agent/src/quiz`: Cloudflare quiz agent worker
 
+## Command Summary
+### Main CLI (`apps/cli/src/cli.ts`)
+- `create`: Creates a Canvas Classic Quiz either from a Nexgen JSON file or generated agent content. It validates the quiz structure and uploads questions to the selected course.
+- `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
+- `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
+- `teacher-notes`: Builds a canonical Teacher Notes page from existing session content. In live mode it updates module placement; in draft mode it prepares a safe draft page without changing live placement.
+
+### Plugins Runner (`apps/plugins-runner/src/cli.ts`)
+- `list`: Shows available reusable Canvas workflow plugins that can be executed by the runner.
+- `run`: Executes a selected plugin against a target course with optional plugin arguments for scoped behavior.
+
 ## Config
 All non-secret settings live in `apps/cli/config/nexgen-canvas-pipeline.config.json`. For session headers, edit
 `sessions.headersTemplate`. Use `{nn}` for a zero-padded session number (e.g. 01) and `{n}` for
