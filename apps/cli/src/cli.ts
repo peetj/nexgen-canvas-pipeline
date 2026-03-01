@@ -1,12 +1,15 @@
 import { Command } from "commander";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { env } from "./env.js";
 import { validateNexgenQuiz } from "./quiz/schema/validate.js";
 import { CanvasClient } from "./canvas/canvasClient.js";
 import { mapToCanvasQuiz } from "./quiz/quizMapper.js";
 import { generateQuizFromAgent } from "./agent/quiz/quizAgentClient.js";
+import { generateTodayIntroFromAgent } from "./agent/sessionIntro/todayIntroAgentClient.js";
 import { buildSessionHeaderTitles, resolveModuleByName } from "./session/sessionHeaders.js";
 import { buildTeacherNotesForSession } from "./session/teacherNotes.js";
+import { buildWhatAreWeDoingTodaySection } from "./session/whatAreWeDoingToday.js";
 import { loadConfig } from "./config.js";
 
 const program = new Command();
@@ -30,6 +33,11 @@ const ANSWER_READ_ONLY_FIELDS = new Set([
   "created_at",
   "updated_at"
 ]);
+const TODAY_SECTION_ASSET_TITLE = "What we are doing Today";
+const NOTE_PLACEHOLDER_TOKEN = "[ADD NOTES]";
+const AI_PROMPT_PLACEHOLDER_TOKEN = "[ADD AI IMAGE PROMPT]";
+const IMAGE_URL_PLACEHOLDER_TOKEN = "https://example.com/your-image.jpg";
+const SESSION_HEADER_PREFIX = "Session ";
 
 program
   .name("nexgen-canvas")
@@ -188,6 +196,492 @@ function buildQuizCloneInput(
         ? sourceQuiz.lock_questions_after_answering
         : undefined,
     hide_results: typeof sourceQuiz.hide_results === "string" ? sourceQuiz.hide_results : undefined
+  };
+}
+
+type TodaySectionAssets = {
+  folderPath: string;
+  notesText?: string;
+  imageUrl?: string;
+  aiImagePrompt?: string;
+  createdFiles: string[];
+  imageSource: "local-file" | "cli-url" | "file-url" | "none";
+  localImagePath?: string;
+  localImageOriginalBytes?: number;
+  localImageOutputBytes?: number;
+  localImageOptimized?: boolean;
+  localImageOutputMimeType?: string;
+  localImageOutputBuffer?: Buffer;
+  localImageOutputFileName?: string;
+};
+
+type SessionMetadata = {
+  sessionNumber?: number;
+  sessionNumberPadded?: string;
+  topic: string;
+};
+const LOCAL_IMAGE_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+  ".svg",
+  ".avif"
+]);
+const MAX_LOCAL_IMAGE_BYTES = 450 * 1024;
+const LOCAL_IMAGE_WEBP_WIDTHS = [1920, 1600, 1366, 1280, 1024, 900, 768, 640];
+const LOCAL_IMAGE_WEBP_QUALITIES = [82, 76, 70, 64, 58, 52, 46];
+
+function toFilesystemSegment(input: string): string {
+  const cleaned = input
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "untitled";
+  return cleaned;
+}
+
+function parseSessionMetadata(sessionName: string): SessionMetadata {
+  const trimmed = sessionName.replace(/\s+/g, " ").trim();
+  const match = trimmed.match(/^Session\s*(\d+)\s*-\s*(.+)$/i);
+  if (!match) {
+    return { topic: trimmed || "Session Overview" };
+  }
+  const number = Number(match[1]);
+  const topic = match[2].trim();
+  return {
+    sessionNumber: Number.isFinite(number) ? number : undefined,
+    sessionNumberPadded: Number.isFinite(number) ? String(number).padStart(2, "0") : undefined,
+    topic: topic || trimmed
+  };
+}
+
+function buildIntroductionPageTitle(sessionName: string): string {
+  const meta = parseSessionMetadata(sessionName);
+  return `Introduction: ${meta.topic}`;
+}
+
+async function ensureFileWithTemplate(filePath: string, content: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return false;
+  } catch (err) {
+    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code !== "ENOENT") throw err;
+    await fs.writeFile(filePath, content, "utf8");
+    return true;
+  }
+}
+
+async function readTextIfExists(filePath: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (err) {
+    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code === "ENOENT") return undefined;
+    throw err;
+  }
+}
+
+function normalizeNotesText(input: string | undefined): string | undefined {
+  if (!input) return undefined;
+  const normalized = input.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return undefined;
+  if (normalized.toLowerCase().includes(NOTE_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
+  return normalized;
+}
+
+function normalizeSingleLineInput(input: string | undefined): string | undefined {
+  if (!input) return undefined;
+  const normalized = input
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !line.startsWith("#"));
+  if (!normalized) return undefined;
+
+  const lower = normalized.toLowerCase();
+  if (lower.includes(AI_PROMPT_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
+  if (lower.includes(IMAGE_URL_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
+  return normalized;
+}
+
+function mimeTypeForImageExtension(filePath: string): string | undefined {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".svg":
+      return "image/svg+xml";
+    case ".avif":
+      return "image/avif";
+    default:
+      return undefined;
+  }
+}
+
+function extensionForMimeType(mimeType: string): string {
+  switch (mimeType) {
+    case "image/png":
+      return ".png";
+    case "image/jpeg":
+      return ".jpg";
+    case "image/webp":
+      return ".webp";
+    case "image/gif":
+      return ".gif";
+    case "image/svg+xml":
+      return ".svg";
+    case "image/avif":
+      return ".avif";
+    default:
+      return "";
+  }
+}
+
+async function findLocalImageFile(folderPath: string): Promise<string | undefined> {
+  const entries = await fs.readdir(folderPath, { withFileTypes: true });
+  const candidates = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => LOCAL_IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()));
+
+  if (candidates.length === 0) return undefined;
+
+  candidates.sort((a, b) => {
+    const aImage = /^image\./i.test(a) ? 0 : 1;
+    const bImage = /^image\./i.test(b) ? 0 : 1;
+    if (aImage !== bImage) return aImage - bImage;
+    return a.localeCompare(b);
+  });
+  return path.resolve(folderPath, candidates[0]);
+}
+
+async function optimizeImageBufferWithSharp(
+  source: Buffer,
+  maxBytes: number
+): Promise<{ buffer: Buffer; mimeType: string; optimized: boolean }> {
+  const sharpModule = await import("sharp");
+  const sharp = sharpModule.default;
+
+  let best = source;
+  for (const width of LOCAL_IMAGE_WEBP_WIDTHS) {
+    for (const quality of LOCAL_IMAGE_WEBP_QUALITIES) {
+      const candidate = await sharp(source, { failOn: "none", animated: false })
+        .rotate()
+        .resize({ width, withoutEnlargement: true, fit: "inside" })
+        .webp({ quality, effort: 4 })
+        .toBuffer();
+
+      if (candidate.byteLength < best.byteLength) {
+        best = candidate;
+      }
+      if (candidate.byteLength <= maxBytes) {
+        return {
+          buffer: candidate,
+          mimeType: "image/webp",
+          optimized: true
+        };
+      }
+    }
+  }
+
+  return {
+    buffer: best,
+    mimeType: "image/webp",
+    optimized: best.byteLength < source.byteLength
+  };
+}
+
+async function imageFileToDataUrl(filePath: string): Promise<{
+  dataUrl: string;
+  originalByteLength: number;
+  outputByteLength: number;
+  optimized: boolean;
+  outputMimeType: string;
+  outputBuffer: Buffer;
+}> {
+  const mime = mimeTypeForImageExtension(filePath);
+  if (!mime) {
+    throw new Error(`Unsupported local image type for "${filePath}".`);
+  }
+
+  const source = Buffer.from(await fs.readFile(filePath));
+  if (source.byteLength <= MAX_LOCAL_IMAGE_BYTES) {
+    return {
+      dataUrl: `data:${mime};base64,${source.toString("base64")}`,
+      originalByteLength: source.byteLength,
+      outputByteLength: source.byteLength,
+      optimized: false,
+      outputMimeType: mime,
+      outputBuffer: source
+    };
+  }
+
+  let optimizedBuffer: Buffer = source;
+  let outputMimeType = mime;
+  let optimized = false;
+  try {
+    const compressed = await optimizeImageBufferWithSharp(source, MAX_LOCAL_IMAGE_BYTES);
+    optimizedBuffer = compressed.buffer;
+    outputMimeType = compressed.mimeType;
+    optimized = compressed.optimized;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Local image is ${formatByteSize(source.byteLength)} and auto-compression failed: ${message}`
+    );
+  }
+
+  if (optimizedBuffer.byteLength > MAX_LOCAL_IMAGE_BYTES) {
+    throw new Error(
+      `Local image is still too large after compression (${formatByteSize(optimizedBuffer.byteLength)}). ` +
+      `Please use a smaller image (target <= ${formatByteSize(MAX_LOCAL_IMAGE_BYTES)}).`
+    );
+  }
+
+  return {
+    dataUrl: `data:${outputMimeType};base64,${optimizedBuffer.toString("base64")}`,
+    originalByteLength: source.byteLength,
+    outputByteLength: optimizedBuffer.byteLength,
+    optimized,
+    outputMimeType,
+    outputBuffer: optimizedBuffer
+  };
+}
+
+function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(2)} MB`;
+}
+
+function sanitizeTodaySectionPreviewHtml(html: string): string {
+  return html.replace(/src="data:[^"]+"/gi, 'src="[local-image-data-uri]"');
+}
+
+function toPlainText(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|li|h1|h2|h3|h4|h5|h6|div)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractParagraphsFromHtml(html: string, max = 2): string[] {
+  const matches = Array.from(html.matchAll(/<p>([\s\S]*?)<\/p>/gi));
+  const out: string[] = [];
+  for (const match of matches) {
+    const text = toPlainText(match[1] ?? "");
+    if (!text) continue;
+    if (/inspiration image placeholder/i.test(text)) continue;
+    if (/^ai image brief:/i.test(text)) continue;
+    out.push(text);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function extractTaskLabels(moduleItems: Array<{ type: string; title: string }>): string[] {
+  return moduleItems
+    .filter((item) => item.type === "SubHeader")
+    .map((item) => item.title.trim())
+    .filter((title) => /^Session\s+\d+\s*:\s*Task\s+[A-Za-z0-9]+/i.test(title))
+    .map((title) => title.replace(/\s+/g, " "));
+}
+
+type CanvasFileUploadInit = {
+  upload_url: string;
+  upload_params: Record<string, unknown>;
+  file_param?: string;
+};
+
+type CanvasUploadedFile = {
+  id: number;
+  url: string;
+  display_name?: string;
+  folder_id?: number;
+  size?: number;
+  content_type?: string;
+};
+
+async function uploadImageToCanvasSessionFolder(input: {
+  courseId: number;
+  sessionFolderPath: string;
+  fileName: string;
+  contentType: string;
+  data: Buffer;
+}): Promise<CanvasUploadedFile> {
+  const initBody = new URLSearchParams({
+    name: input.fileName,
+    size: String(input.data.byteLength),
+    content_type: input.contentType,
+    parent_folder_path: input.sessionFolderPath,
+    on_duplicate: "rename"
+  });
+
+  const initRes = await fetch(`${env.canvasBaseUrl}/api/v1/courses/${input.courseId}/files`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.canvasApiToken}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: initBody.toString()
+  });
+  if (!initRes.ok) {
+    const text = await initRes.text().catch(() => "");
+    throw new Error(
+      `Canvas file upload init failed ${initRes.status} ${initRes.statusText}\n${text}`
+    );
+  }
+  const init = (await initRes.json()) as CanvasFileUploadInit;
+
+  const uploadForm = new FormData();
+  for (const [key, value] of Object.entries(init.upload_params ?? {})) {
+    if (value === undefined || value === null) continue;
+    uploadForm.append(key, String(value));
+  }
+  const paramName = init.file_param && init.file_param.trim().length > 0 ? init.file_param : "file";
+  const arrayBuffer = Uint8Array.from(input.data).buffer;
+  uploadForm.append(paramName, new Blob([arrayBuffer], { type: input.contentType }), input.fileName);
+
+  const uploadRes = await fetch(init.upload_url, {
+    method: "POST",
+    body: uploadForm,
+    redirect: "follow"
+  });
+  if (!uploadRes.ok) {
+    const text = await uploadRes.text().catch(() => "");
+    throw new Error(
+      `Canvas file upload failed ${uploadRes.status} ${uploadRes.statusText}\n${text}`
+    );
+  }
+
+  const uploaded = (await uploadRes.json()) as CanvasUploadedFile;
+  if (!uploaded?.url) {
+    throw new Error("Canvas file upload succeeded but returned no file URL.");
+  }
+  return uploaded;
+}
+
+async function prepareTodaySectionAssets(input: {
+  assetsRoot: string;
+  sessionName: string;
+  sectionTitle: string;
+  notesText?: string;
+  notesFilePath?: string;
+  imageUrl?: string;
+  aiImagePrompt?: string;
+}): Promise<TodaySectionAssets> {
+  const folderPath = path.resolve(
+    input.assetsRoot,
+    toFilesystemSegment(input.sessionName),
+    toFilesystemSegment(input.sectionTitle)
+  );
+  await fs.mkdir(folderPath, { recursive: true });
+
+  const notesPath = path.resolve(folderPath, "notes.md");
+  const imageUrlPath = path.resolve(folderPath, "image-url.txt");
+  const aiPromptPath = path.resolve(folderPath, "ai-image-prompt.txt");
+
+  const createdFiles: string[] = [];
+  const notesTemplate = `${NOTE_PLACEHOLDER_TOKEN}
+
+Write one or two short paragraphs that explain what students are doing in this session.
+`;
+  const imageTemplate = `${IMAGE_URL_PLACEHOLDER_TOKEN}
+`;
+  const aiPromptTemplate = `${AI_PROMPT_PLACEHOLDER_TOKEN}
+`;
+
+  if (await ensureFileWithTemplate(notesPath, notesTemplate)) createdFiles.push(notesPath);
+  if (await ensureFileWithTemplate(imageUrlPath, imageTemplate)) createdFiles.push(imageUrlPath);
+  if (await ensureFileWithTemplate(aiPromptPath, aiPromptTemplate)) createdFiles.push(aiPromptPath);
+
+  let notesText = normalizeNotesText(input.notesText);
+  if (!notesText && input.notesFilePath) {
+    const loaded = await fs.readFile(path.resolve(input.notesFilePath), "utf8");
+    notesText = normalizeNotesText(loaded);
+  }
+  if (!notesText) {
+    notesText = normalizeNotesText(await readTextIfExists(notesPath));
+  } else {
+    await fs.writeFile(notesPath, `${notesText}\n`, "utf8");
+  }
+
+  let imageUrl = normalizeSingleLineInput(input.imageUrl);
+  if (!imageUrl) {
+    imageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
+  } else {
+    await fs.writeFile(imageUrlPath, `${imageUrl}\n`, "utf8");
+  }
+
+  const localImagePath = await findLocalImageFile(folderPath);
+  let localImageOriginalBytes: number | undefined;
+  let localImageOutputBytes: number | undefined;
+  let localImageOptimized: boolean | undefined;
+  let localImageOutputMimeType: string | undefined;
+  let localImageOutputBuffer: Buffer | undefined;
+  let localImageOutputFileName: string | undefined;
+  let imageSource: TodaySectionAssets["imageSource"] = "none";
+  if (localImagePath) {
+    const converted = await imageFileToDataUrl(localImagePath);
+    imageUrl = converted.dataUrl;
+    localImageOriginalBytes = converted.originalByteLength;
+    localImageOutputBytes = converted.outputByteLength;
+    localImageOptimized = converted.optimized;
+    localImageOutputMimeType = converted.outputMimeType;
+    localImageOutputBuffer = converted.outputBuffer;
+    const baseName = path.basename(localImagePath, path.extname(localImagePath));
+    const ext = extensionForMimeType(converted.outputMimeType) || path.extname(localImagePath);
+    localImageOutputFileName = `${toFilesystemSegment(baseName)}${ext}`;
+    imageSource = "local-file";
+  } else if (input.imageUrl && normalizeSingleLineInput(input.imageUrl)) {
+    imageSource = "cli-url";
+  } else if (imageUrl) {
+    imageSource = "file-url";
+  }
+
+  let aiImagePrompt = normalizeSingleLineInput(input.aiImagePrompt);
+  if (!aiImagePrompt) {
+    aiImagePrompt = normalizeSingleLineInput(await readTextIfExists(aiPromptPath));
+  } else {
+    await fs.writeFile(aiPromptPath, `${aiImagePrompt}\n`, "utf8");
+  }
+
+  return {
+    folderPath,
+    notesText,
+    imageUrl,
+    aiImagePrompt,
+    createdFiles,
+    imageSource,
+    localImagePath,
+    localImageOriginalBytes,
+    localImageOutputBytes,
+    localImageOptimized,
+    localImageOutputMimeType,
+    localImageOutputBuffer,
+    localImageOutputFileName
   };
 }
 
@@ -525,6 +1019,221 @@ program.command("teacher-notes")
       if (movedModuleItem) console.log("Moved module item to top of session.");
       if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
     }
+    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
+  });
+
+program.command("today-section")
+  .description("Generate or update the session page for the 'What we are doing Today' section.")
+  .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
+  .option("--page-title <title>", "Canvas page title override (default: Introduction: <session topic>)")
+  .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
+  .option("--notes <text>", "Optional raw notes text (rewritten by agent)")
+  .option("--notes-file <path>", "Optional path to raw notes text/markdown (rewritten by agent)")
+  .option("--image-url <url>", "Optional image URL to embed in the section")
+  .option("--ai-image-prompt <text>", "Optional AI image prompt/brief to include and save locally")
+  .option("--publish", "Publish page after create/update (default is unpublished)", false)
+  .option(
+    "--assets-root <path>",
+    "Local root for section notes/images",
+    path.resolve(process.cwd(), "apps", "cli", "session-assets")
+  )
+  .option("--dry-run", "Generate and preview without uploading", false)
+  .action(async (opts) => {
+    const courseId = Number(opts.courseId);
+    if (!Number.isFinite(courseId)) {
+      throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+    }
+
+    if (opts.notes && opts.notesFile) {
+      throw new Error("Use either --notes or --notes-file, not both.");
+    }
+
+    const sessionName = String(opts.sessionName);
+    const sessionMeta = parseSessionMetadata(sessionName);
+    const pageTitle = opts.pageTitle
+      ? String(opts.pageTitle)
+      : buildIntroductionPageTitle(sessionName);
+    const shouldPublish = Boolean(opts.publish);
+    const assetsRoot = path.resolve(String(opts.assetsRoot));
+
+    const assets = await prepareTodaySectionAssets({
+      assetsRoot,
+      sessionName,
+      sectionTitle: TODAY_SECTION_ASSET_TITLE,
+      notesText: opts.notes ? String(opts.notes) : undefined,
+      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined,
+      imageUrl: opts.imageUrl ? String(opts.imageUrl) : undefined,
+      aiImagePrompt: opts.aiImagePrompt ? String(opts.aiImagePrompt) : undefined
+    });
+
+    const client = new CanvasClient();
+    const seedBuilt = await buildWhatAreWeDoingTodaySection(client, courseId, sessionName, {
+      sectionTitle: pageTitle,
+      notesText: undefined,
+      imageUrl: assets.imageUrl,
+      aiImagePrompt: assets.aiImagePrompt
+    });
+
+    const modulePageTitles = seedBuilt.moduleItems
+      .filter((item) => item.type === "Page")
+      .map((item) => item.title);
+    const taskLabels = extractTaskLabels(seedBuilt.moduleItems);
+    const fallbackSummaryParagraphs = extractParagraphsFromHtml(seedBuilt.sectionHtml, 2);
+
+    const generatedIntro = await generateTodayIntroFromAgent({
+      sessionName,
+      sessionTopic: sessionMeta.topic,
+      notesText: assets.notesText,
+      taskLabels,
+      modulePageTitles,
+      fallbackSummaryParagraphs,
+      paragraphCount: 2
+    });
+    const agentNotesText = generatedIntro.paragraphs.join("\n\n");
+    const finalAiImagePrompt = assets.aiImagePrompt ?? generatedIntro.imagePrompt;
+
+    let built = await buildWhatAreWeDoingTodaySection(client, courseId, sessionName, {
+      sectionTitle: pageTitle,
+      notesText: agentNotesText,
+      imageUrl: assets.imageUrl,
+      aiImagePrompt: finalAiImagePrompt
+    });
+
+    console.log(`Course: ${courseId}`);
+    console.log(`Session module: ${built.module.name} (${built.module.id})`);
+    console.log(`Page title: ${pageTitle}`);
+    console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
+    console.log(`Section folder key: ${TODAY_SECTION_ASSET_TITLE}`);
+    console.log(`Assets folder: ${assets.folderPath}`);
+    if (assets.createdFiles.length > 0) {
+      console.log("Created local asset templates:");
+      for (const createdPath of assets.createdFiles) {
+        console.log(`- ${createdPath}`);
+      }
+    }
+    console.log(`Source pages scanned: ${built.sourcePageCount}`);
+    console.log(`Intro pages used: ${built.introPageCount}`);
+    console.log("Summary source: agent-generated from notes + module context");
+    if (assets.imageSource === "local-file") {
+      const before = assets.localImageOriginalBytes ? formatByteSize(assets.localImageOriginalBytes) : undefined;
+      const after = assets.localImageOutputBytes ? formatByteSize(assets.localImageOutputBytes) : undefined;
+      const optimizedTag = assets.localImageOptimized ? " [optimized]" : "";
+      console.log(
+        `Image mode: local file override (${assets.localImagePath})${optimizedTag}` +
+        `${before && after ? ` (${before} -> ${after})` : ""}` +
+        `${assets.localImageOutputMimeType ? ` [${assets.localImageOutputMimeType}]` : ""}`
+      );
+    } else if (assets.imageSource === "cli-url") {
+      console.log("Image mode: --image-url input");
+    } else if (assets.imageSource === "file-url") {
+      console.log("Image mode: image-url.txt");
+    } else if (built.imageUrl) {
+      console.log("Image mode: auto-detected from existing module intro content");
+    } else {
+      console.log("Image mode: placeholder");
+    }
+    if (finalAiImagePrompt) {
+      console.log(`AI image brief: ${finalAiImagePrompt}`);
+    }
+    console.log(`Target module position: ${built.insertionPosition}`);
+
+    if (opts.dryRun) {
+      console.log("Dry run: no Canvas updates performed.");
+      console.log("Generated HTML preview:");
+      console.log(sanitizeTodaySectionPreviewHtml(built.sectionHtml).split("\n").slice(0, 40).join("\n"));
+      return;
+    }
+
+    if (assets.imageSource === "local-file" && assets.localImageOutputBuffer && assets.localImageOutputMimeType) {
+      if (!sessionMeta.sessionNumberPadded) {
+        throw new Error(
+          `Cannot map session name "${sessionName}" to a Session NN files folder for image upload.`
+        );
+      }
+      const sessionFolderPath = `${SESSION_HEADER_PREFIX}${sessionMeta.sessionNumberPadded}`;
+      const uploadName =
+        assets.localImageOutputFileName ??
+        `intro-${sessionMeta.sessionNumberPadded}${extensionForMimeType(assets.localImageOutputMimeType)}`;
+      const uploaded = await uploadImageToCanvasSessionFolder({
+        courseId,
+        sessionFolderPath,
+        fileName: uploadName,
+        contentType: assets.localImageOutputMimeType,
+        data: assets.localImageOutputBuffer
+      });
+      console.log(
+        `Uploaded image to Canvas files (${sessionFolderPath}): ${uploaded.display_name ?? uploadName} (${uploaded.id})`
+      );
+      built = await buildWhatAreWeDoingTodaySection(client, courseId, sessionName, {
+        sectionTitle: pageTitle,
+        notesText: agentNotesText,
+        imageUrl: uploaded.url,
+        aiImagePrompt: finalAiImagePrompt
+      });
+    }
+
+    const normalize = (v: string): string => v.trim().toLowerCase();
+    const existingModulePage = built.moduleItems.find(
+      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
+    );
+
+    let pageUrl: string;
+    let createdPage = false;
+    let createdModuleItem = false;
+    let movedModuleItem = false;
+
+    if (existingModulePage?.page_url) {
+      pageUrl = existingModulePage.page_url;
+      await client.updatePage(courseId, pageUrl, {
+        title: pageTitle,
+        body: built.sectionHtml,
+        published: shouldPublish
+      });
+    } else {
+      const pages = await client.listPages(courseId, pageTitle);
+      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
+      if (existingPage) {
+        pageUrl = existingPage.url;
+        await client.updatePage(courseId, pageUrl, {
+          title: pageTitle,
+          body: built.sectionHtml,
+          published: shouldPublish
+        });
+      } else {
+        const created = await client.createPage(courseId, {
+          title: pageTitle,
+          body: built.sectionHtml,
+          published: shouldPublish
+        });
+        pageUrl = created.url;
+        createdPage = true;
+      }
+    }
+
+    const moduleItemForPage = built.moduleItems.find(
+      (item) => item.type === "Page" && item.page_url === pageUrl
+    );
+    if (!moduleItemForPage) {
+      await client.createModulePageItem(courseId, built.module.id, {
+        title: pageTitle,
+        pageUrl,
+        position: built.insertionPosition
+      });
+      createdModuleItem = true;
+    } else if (moduleItemForPage.position !== built.insertionPosition) {
+      await client.updateModuleItemPosition(
+        courseId,
+        built.module.id,
+        moduleItemForPage.id,
+        built.insertionPosition
+      );
+      movedModuleItem = true;
+    }
+
+    console.log(createdPage ? "Created page." : "Updated existing page.");
+    if (createdModuleItem) console.log("Added page to session module.");
+    if (movedModuleItem) console.log("Moved module item to target section.");
+    if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
     console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
   });
 
