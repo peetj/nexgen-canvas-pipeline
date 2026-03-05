@@ -11,18 +11,19 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 ## Setup
 1. Install Node.js 18+.
 2. Copy .env.example to .env and fill values.
-   - Configure `CANVAS_AGENT_URL` (single worker base URL). CLI derives both `/generate-quiz` and `/today-intro`.
+   - Configure `CANVAS_AGENT_URL` (single worker base URL). CLI derives `/generate-quiz`, `/today-intro`, and `/task-a-content`.
 3. Install deps:
    npm install
 
 ## Repo layout
-- `apps/cli`: Canvas automation CLI app (quiz/session/teacher-notes commands)
+- `apps/cli`: Canvas automation CLI app (quiz/session/task/teacher-notes commands)
 - `apps/plugins-runner`: plugin runtime app for reusable Canvas plugins
 - `apps/cli/config/nexgen-canvas-pipeline.config.json`: CLI config defaults
 - `apps/cli/examples`: example quiz payloads
 - `packages/canvas-sdk`: shared Canvas API client and types
 - `agent/src/quiz`: Cloudflare quiz generator endpoint (`/generate-quiz`)
 - `agent/src/todayIntro`: Cloudflare intro rewrite endpoint for `today-section` (`/today-intro`)
+- `agent/src/taskA`: Cloudflare Task A enrichment endpoint for task pages (`/task-a-content`)
 
 ## Command Summary
 ### Main CLI (`apps/cli/src/cli.ts`)
@@ -30,6 +31,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 - `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
 - `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
 - `teacher-notes`: Builds a canonical Teacher Notes page from existing session content. In live mode it updates module placement; in draft mode it prepares a safe draft page without changing live placement.
+- `task-a-section`: Builds/updates a Task A page from `session-assets/<session>/<task-folder>/notes.md` and local media, applying processor tags and placing it under the `Session NN: Task A` header.
 - `today-section`: Builds/updates the session introduction page for the `What we are doing Today` section. It rewrites notes via the intro agent, uploads local images to Canvas Files (`Session NN`), then applies final HTML.
 
 ### Plugins Runner (`apps/plugins-runner/src/cli.ts`)
@@ -168,6 +170,55 @@ npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session
 
 # npm wrapper form
 npm run dev -- teacher-notes -- --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
+```
+
+### Command: `task-a-section`
+Generate/update the `Task A` page from local session assets.
+
+Options:
+- `--session-name <name>`: Required. Exact Canvas module name for the session.
+- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `Task A`.
+- `--task-title <title>`: Optional Task A title override (otherwise read from `notes.md` `** Page Title` section).
+- `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` page title.
+- `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
+- `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
+- `--notes-file <path>`: Optional notes markdown file override (saved to `notes.md`).
+- `--publish`: Publish page after create/update. Default is unpublished.
+- `--assets-root <path>`: Optional local assets root. Default: `apps/cli/session-assets`.
+- `--dry-run`: Generate preview only; no Canvas updates or media uploads.
+
+Task A asset skeleton (auto-created if missing):
+- `notes.md` only (single source of truth)
+- `images/` folder (for local image/video assets)
+
+`notes.md` processor tags:
+- `[IMAGE]file-name.jpg[/IMAGE]`
+- `[YOUTUBE_LINK]https://youtu.be/...[/YOUTUBE_LINK]`
+- `[NOTE]...[/NOTE]`, `[INFO]...[/INFO]`, `[WARNING]...[/WARNING]`, `[SUCCESS]...[/SUCCESS]`, `[QUESTION]...[/QUESTION]`
+- `[AGENT]...[/AGENT]` (processor instruction only, not rendered)
+
+Formatting behavior:
+- `*** Heading` lines are converted to `<h3>`.
+- Markdown bullet lists remain bullet lists.
+- Page title in Canvas is used as the page heading (body heading is suppressed).
+Global style override is supported via `.env` (`CONTENT_STYLE_NOTE`, `CONTENT_STYLE_INFO`, `CONTENT_STYLE_WARNING`, `CONTENT_STYLE_SUCCESS`, `CONTENT_STYLE_QUESTION`).
+Use quotes around these values in `.env` so `#` color values parse correctly.
+
+Local media behavior:
+- Image/video files placed anywhere inside the Task A folder (including `images/`) are auto-detected.
+- In non-dry-run mode they are uploaded to Canvas Files folder `Session NN` and embedded in the page.
+- In dry-run mode they are discovered but not uploaded.
+
+Examples:
+```bash
+# Preview Task A HTML and discovered assets
+npx tsx apps/cli/src/cli.ts task-a-section --course-id 21 --session-name "Session 05 - Soldering" --dry-run
+
+# Use a custom task folder under session-assets and publish live
+npx tsx apps/cli/src/cli.ts task-a-section --course-id 21 --session-name "Session 05 - Soldering" --task-folder "Soldering Basics" --publish
+
+# Seed/update notes from a markdown file
+npx tsx apps/cli/src/cli.ts task-a-section --course-id 21 --session-name "Session 05 - Soldering" --notes-file docs/session-05-task-a.md
 ```
 
 ### Command: `today-section`

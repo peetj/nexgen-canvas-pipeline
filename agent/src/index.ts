@@ -1,4 +1,5 @@
 import quizAgent from "./quiz/index.js";
+import taskAAgent from "./taskA/index.js";
 import todayIntroAgent from "./todayIntro/index.js";
 
 type Env = {
@@ -16,6 +17,9 @@ export default {
     if (url.pathname === "/generate-quiz") {
       return quizAgent.fetch(request, env);
     }
+    if (url.pathname === "/task-a-content") {
+      return taskAAgent.fetch(request, env);
+    }
     if (url.pathname === "/generate") {
       return Promise.resolve(
         new Response(
@@ -31,8 +35,8 @@ export default {
     }
     return Promise.resolve(
       new Response(
-        JSON.stringify({
-          error: "Not found. Available routes: /generate-quiz, /today-intro"
+          JSON.stringify({
+          error: "Not found. Available routes: /generate-quiz, /today-intro, /task-a-content"
         }),
         {
           status: 404,
