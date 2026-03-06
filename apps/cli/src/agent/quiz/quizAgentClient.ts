@@ -2,7 +2,9 @@ import { env } from "../../env.js";
 
 export async function generateQuizFromAgent(prompt: string): Promise<unknown> {
   if (!env.quizAgentUrl) {
-    throw new Error("QUIZ_AGENT_URL is not set. For now use --from-file.");
+    throw new Error(
+      "Quiz agent URL is not set. Configure CANVAS_AGENT_URL (recommended) or QUIZ_AGENT_URL."
+    );
   }
 
   const res = await fetch(env.quizAgentUrl, {

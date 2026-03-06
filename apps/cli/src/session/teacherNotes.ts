@@ -4,6 +4,7 @@ import {
   CanvasModuleSummary
 } from "../canvas/canvasClient.js";
 import { resolveModuleByName } from "./sessionHeaders.js";
+import { TEACHER_NOTES_TEMPLATE } from "./teacherNotesTemplate.js";
 
 type SessionPageContext = {
   title: string;
@@ -18,9 +19,19 @@ type SessionTask = {
   pages: SessionPageContext[];
 };
 
+type CoursePageContext = SessionPageContext & {
+  moduleId: number;
+  moduleName: string;
+};
+
 type CommonIssue = {
   issue: string;
   solution: string;
+};
+
+type CourseInsight = {
+  highlightAreas: string[];
+  issueHints: CommonIssue[];
 };
 
 export type TeacherNotesBuildResult = {
@@ -48,7 +59,39 @@ const HARDWARE_KEYWORDS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\besp32\b|\bnodemcu\b/i, label: "NodeMCU ESP32 board" },
   { pattern: /\bbreadboard\b/i, label: "Breadboard" },
   { pattern: /\bjumper wire/i, label: "Jumper wires" },
-  { pattern: /\busb\b/i, label: "USB cable" }
+  { pattern: /\busb\b/i, label: "USB cable" },
+  { pattern: /\bsolder(?:ing)?\b|\bsoldering iron\b/i, label: "Soldering iron" },
+  { pattern: /\bflux\b/i, label: "Flux / solder paste" },
+  { pattern: /\bmultimeter\b|\bcontinuity\b/i, label: "Multimeter (continuity mode)" },
+  { pattern: /\bdesolder(?:ing)?\b|\bsolder wick\b/i, label: "Desoldering braid / solder wick" }
+];
+
+const COURSE_HIGHLIGHT_SIGNALS: Array<{ pattern: RegExp; point: string }> = [
+  {
+    pattern: /\b(debug|troubleshoot|serial monitor|test)\b/i,
+    point:
+      "Push students to use a visible debug loop: inspect, test, adjust, and retest before asking for fixes."
+  },
+  {
+    pattern: /\b(wiring|pin|connection|diagram)\b/i,
+    point:
+      "Treat wiring verification as mandatory evidence, not a verbal check. Students should trace each connection against the diagram."
+  },
+  {
+    pattern: /\b(upload|compile|port|board)\b/i,
+    point:
+      "Anticipate upload and board-selection friction. Have a rapid board/port checklist ready before students escalate."
+  },
+  {
+    pattern: /\b(solder|soldering|iron|flux|continuity|bridge|cold joint)\b/i,
+    point:
+      "For soldering, prioritize technique checkpoints: iron temperature, joint quality, bridge checks, and continuity testing."
+  },
+  {
+    pattern: /\b(save|checkpoint|version)\b/i,
+    point:
+      "Require checkpoint saves at each working milestone so students can recover from failed experiments quickly."
+  }
 ];
 
 // These are treated as system-level authoring rules for all future teacher-notes runs.
@@ -72,32 +115,24 @@ export async function buildTeacherNotesForSession(
   const moduleItems = await client.listModuleItems(courseId, module.id);
   const sortedItems = [...moduleItems].sort((a, b) => a.position - b.position);
 
-  const teacherNotesRange = findTeacherNotesRange(sortedItems);
-  const pageTitleKey = pageTitle.trim().toLowerCase();
-  const pageItems = sortedItems.filter(
-    (item) =>
-      item.type === "Page" &&
-      !!item.page_url &&
-      item.title.trim().toLowerCase() !== pageTitleKey &&
-      !item.title.toLowerCase().includes("teacher notes") &&
-      !isPositionInRange(item.position, teacherNotesRange)
+  const pageCache = new Map<string, { bodyHtml: string; bodyText: string }>();
+  const modulePages = await collectModulePages(
+    client,
+    courseId,
+    sortedItems,
+    pageTitle,
+    pageCache
   );
-  const modulePages = (
-    await Promise.all(
-      pageItems.map(async (item) => {
-        const page = await client.getPage(courseId, String(item.page_url));
-        return {
-          title: item.title,
-          pageUrl: String(item.page_url),
-          position: item.position,
-          bodyHtml: page.body ?? "",
-          bodyText: toPlainText(page.body ?? "")
-        };
-      })
-    )
-  ).sort((a, b) => a.position - b.position);
+  const coursePages = await collectCoursePages(client, courseId, pageTitle, pageCache);
+  const courseInsight = buildCourseInsights(sessionName, modulePages, coursePages);
 
-  const notesHtml = renderTeacherNotesHtml(pageTitle, sessionName, sortedItems, modulePages);
+  const notesHtml = renderTeacherNotesHtml(
+    pageTitle,
+    sessionName,
+    sortedItems,
+    modulePages,
+    courseInsight
+  );
   const insertionPosition = findTeacherNotesInsertionPosition(sortedItems);
 
   return {
@@ -109,12 +144,114 @@ export async function buildTeacherNotesForSession(
   };
 }
 
+async function collectModulePages(
+  client: CanvasClient,
+  courseId: number,
+  moduleItems: CanvasModuleItem[],
+  pageTitle: string,
+  pageCache: Map<string, { bodyHtml: string; bodyText: string }>
+): Promise<SessionPageContext[]> {
+  const teacherNotesRange = findTeacherNotesRange(moduleItems);
+  const pageTitleKey = normalizeLoose(pageTitle);
+  const pageItems = moduleItems.filter(
+    (item) =>
+      item.type === "Page" &&
+      !!item.page_url &&
+      normalizeLoose(item.title) !== pageTitleKey &&
+      !normalizeLoose(item.title).includes("teacher notes") &&
+      !isPositionInRange(item.position, teacherNotesRange)
+  );
+
+  const pages = await Promise.all(
+    pageItems.map(async (item) => {
+      const pageUrl = String(item.page_url);
+      const data = await getPageData(client, courseId, pageUrl, pageCache);
+      return {
+        title: item.title,
+        pageUrl,
+        position: item.position,
+        bodyHtml: data.bodyHtml,
+        bodyText: data.bodyText
+      };
+    })
+  );
+
+  return pages.sort((a, b) => a.position - b.position);
+}
+
+async function collectCoursePages(
+  client: CanvasClient,
+  courseId: number,
+  pageTitle: string,
+  pageCache: Map<string, { bodyHtml: string; bodyText: string }>
+): Promise<CoursePageContext[]> {
+  const modules = await client.listModules(courseId);
+  const sessionModules = modules.filter((module) => /^session\s+\d+/i.test(module.name.trim()));
+  const modulesToScan = sessionModules.length > 0 ? sessionModules : modules;
+
+  const pagesByModule = await Promise.all(
+    modulesToScan.map(async (module) => {
+      const moduleItems = (await client.listModuleItems(courseId, module.id)).sort(
+        (a, b) => a.position - b.position
+      );
+      const teacherNotesRange = findTeacherNotesRange(moduleItems);
+      const pageTitleKey = normalizeLoose(pageTitle);
+      const pageItems = moduleItems.filter(
+        (item) =>
+          item.type === "Page" &&
+          !!item.page_url &&
+          normalizeLoose(item.title) !== pageTitleKey &&
+          !normalizeLoose(item.title).includes("teacher notes") &&
+          !isPositionInRange(item.position, teacherNotesRange)
+      );
+
+      return Promise.all(
+        pageItems.map(async (item) => {
+          const pageUrl = String(item.page_url);
+          const data = await getPageData(client, courseId, pageUrl, pageCache);
+          return {
+            title: item.title,
+            pageUrl,
+            position: item.position,
+            bodyHtml: data.bodyHtml,
+            bodyText: data.bodyText,
+            moduleId: module.id,
+            moduleName: module.name
+          };
+        })
+      );
+    })
+  );
+
+  return pagesByModule.flat();
+}
+
+async function getPageData(
+  client: CanvasClient,
+  courseId: number,
+  pageUrl: string,
+  pageCache: Map<string, { bodyHtml: string; bodyText: string }>
+): Promise<{ bodyHtml: string; bodyText: string }> {
+  const cached = pageCache.get(pageUrl);
+  if (cached) return cached;
+
+  const page = await client.getPage(courseId, pageUrl);
+  const data = {
+    bodyHtml: page.body ?? "",
+    bodyText: toPlainText(page.body ?? "")
+  };
+  pageCache.set(pageUrl, data);
+  return data;
+}
+
 function findTeacherNotesRange(
   items: CanvasModuleItem[]
 ): { start: number; endExclusive: number } | undefined {
   const sorted = [...items].sort((a, b) => a.position - b.position);
   const header = sorted.find(
-    (item) => item.type === "SubHeader" && item.title.trim().toLowerCase() === "teachers notes"
+    (item) =>
+      item.type === "SubHeader" &&
+      (normalizeLoose(item.title) === "teachers notes" || normalizeLoose(item.title) === "teacher notes")
   );
   if (!header) return undefined;
 
@@ -139,7 +276,8 @@ function renderTeacherNotesHtml(
   pageTitle: string,
   sessionName: string,
   moduleItems: CanvasModuleItem[],
-  modulePages: SessionPageContext[]
+  modulePages: SessionPageContext[],
+  courseInsight: CourseInsight
 ): string {
   const introPages = resolveIntroPages(moduleItems, modulePages);
   const tasks = resolveTasks(moduleItems, modulePages);
@@ -152,10 +290,12 @@ function renderTeacherNotesHtml(
     "3x4 matrix keypad",
     "NodeMCU ESP32 board"
   ]);
+  const highlightAreas = courseInsight.highlightAreas;
+  const commonIssues = buildCommonIssues(tasks, fullText, courseInsight.issueHints, sessionName);
 
   const lines: string[] = [];
   lines.push(`<h2>${escapeHtml(pageTitle)}</h2>`);
-  lines.push("<h3>Main Session Objective</h3>");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mainSessionObjectiveHeading)}</h3>`);
   lines.push(`<p>${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.sessionObjectiveLead)}</p>`);
   lines.push("<ul>");
   for (const point of objectivePoints) {
@@ -164,28 +304,40 @@ function renderTeacherNotesHtml(
   lines.push("</ul>");
   lines.push(`<p><strong>Teacher focus:</strong> ${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.sessionTeacherFocus)}</p>`);
   lines.push("<hr />");
-  lines.push("<h3>Components &amp; Software Required</h3>");
-  lines.push("<p><strong>Software:</strong></p>");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.componentsAndSoftwareHeading)}</h3>`);
+  lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.softwareLabel)}</strong></p>`);
   lines.push("<ul>");
   for (const item of software) {
     lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
   }
   lines.push("</ul>");
-  lines.push("<p><strong>Hardware:</strong></p>");
+  lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.hardwareLabel)}</strong></p>`);
   lines.push("<ul>");
   for (const item of hardware) {
     lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
   }
   lines.push("</ul>");
 
+  lines.push("<hr />");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherHighlightAreasHeading)}</h3>`);
+  lines.push("<ul>");
+  for (const highlight of highlightAreas) {
+    lines.push(`<li><p>${escapeHtml(highlight)}</p></li>`);
+  }
+  lines.push("</ul>");
+
+  lines.push("<hr />");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.taskGuidanceHeading)}</h3>`);
+  if (tasks.length === 0) {
+    lines.push("<p>No task headers were detected for this module. Add task subheaders so this section can be expanded automatically.</p>");
+  }
   for (const task of tasks) {
-    lines.push("<hr />");
-    lines.push(`<h3>${escapeHtml(task.title)}</h3>`);
+    lines.push(`<h4>${escapeHtml(task.title)}</h4>`);
     lines.push(`<p>${escapeHtml(buildTaskSummary(task))}</p>`);
 
     const taskPoints = buildTaskPoints(task);
     if (taskPoints.length > 0) {
-      lines.push("<p>Key points to reinforce:</p>");
+      lines.push(`<p>${escapeHtml(TEACHER_NOTES_TEMPLATE.reinforceLabel)}</p>`);
       lines.push("<ul>");
       for (const point of taskPoints) {
         lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
@@ -193,17 +345,20 @@ function renderTeacherNotesHtml(
       lines.push("</ul>");
     }
     const differentiation = buildTaskDifferentiation(task);
-    lines.push("<p><strong>Differentiation:</strong></p>");
+    lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.differentiationLabel)}</strong></p>`);
     lines.push("<ul>");
-    lines.push(`<li><p><strong>Beginners (Year 7):</strong> ${escapeHtml(differentiation.beginner)}</p></li>`);
-    lines.push(`<li><p><strong>Extension (confident students / Year 10):</strong> ${escapeHtml(differentiation.extension)}</p></li>`);
+    lines.push(
+      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.beginnersLabel)}</strong> ${escapeHtml(differentiation.beginner)}</p></li>`
+    );
+    lines.push(
+      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.extensionLabel)}</strong> ${escapeHtml(differentiation.extension)}</p></li>`
+    );
     lines.push("</ul>");
     lines.push(`<p><strong>Teacher focus:</strong> ${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.taskTeacherFocus)}</p>`);
   }
 
-  const commonIssues = buildCommonIssues(tasks, fullText);
   lines.push("<hr />");
-  lines.push("<h3>Most Common Issues</h3>");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mostCommonIssuesHeading)}</h3>`);
   lines.push("<ul>");
   for (const issue of commonIssues) {
     lines.push("<li>");
@@ -263,9 +418,15 @@ function buildTaskPoints(task: SessionTask): string[] {
   return dedupe(points).slice(0, 3);
 }
 
-function buildCommonIssues(tasks: SessionTask[], fullText: string): CommonIssue[] {
+function buildCommonIssues(
+  tasks: SessionTask[],
+  fullText: string,
+  issueHints: CommonIssue[],
+  sessionName: string
+): CommonIssue[] {
   const issues: CommonIssue[] = [];
   const lower = fullText.toLowerCase();
+  const isSoldering = isSolderingContext(sessionName, fullText);
 
   if (/\bwiring\b/.test(lower)) {
     issues.push({
@@ -292,6 +453,12 @@ function buildCommonIssues(tasks: SessionTask[], fullText: string): CommonIssue[
     });
   }
 
+  if (isSoldering) {
+    issues.push(...buildSolderingIssues());
+  }
+
+  issues.push(...issueHints);
+
   if (issues.length < 3 && tasks.length > 0) {
     issues.push({
       issue: "Students make multiple changes at once and lose track of the cause of errors.",
@@ -305,7 +472,116 @@ function buildCommonIssues(tasks: SessionTask[], fullText: string): CommonIssue[
     });
   }
 
-  return dedupeIssues(issues).slice(0, 4);
+  const maxIssues = isSoldering ? 8 : 6;
+  return dedupeIssues(issues).slice(0, maxIssues);
+}
+
+function buildCourseInsights(
+  sessionName: string,
+  modulePages: SessionPageContext[],
+  coursePages: CoursePageContext[]
+): CourseInsight {
+  const moduleText = modulePages.map((page) => page.bodyText).join("\n");
+  const courseText = coursePages.map((page) => page.bodyText).join("\n");
+  const combinedText = `${moduleText}\n${courseText}`;
+  const isSoldering = isSolderingContext(sessionName, combinedText);
+
+  const highlightAreas = COURSE_HIGHLIGHT_SIGNALS
+    .filter((signal) => {
+      const moduleMatch = signal.pattern.test(moduleText);
+      const recurringCourseMatch = countModulesWithPattern(coursePages, signal.pattern) >= 2;
+      return moduleMatch || recurringCourseMatch;
+    })
+    .map((signal) => signal.point);
+
+  if (isSoldering) {
+    highlightAreas.push(
+      "Soldering quality control should be explicit: inspect every joint, check for bridges, and confirm continuity before power-on."
+    );
+  }
+  if (highlightAreas.length < 3) {
+    highlightAreas.push(
+      "Use formative checkpoints after each task so misconceptions are corrected early instead of carrying into later tasks."
+    );
+  }
+  if (highlightAreas.length < 3) {
+    highlightAreas.push(
+      "Ask students to explain why a fix worked, not just what they changed, to strengthen transferable troubleshooting habits."
+    );
+  }
+
+  const issueHints: CommonIssue[] = [];
+  if (countModulesWithPattern(coursePages, /\b(upload|compile|port|board)\b/i) >= 3) {
+    issueHints.push({
+      issue: "Board/port mismatch appears repeatedly across sessions.",
+      solution: "Run a 30-second board-port-cable check at the start of practical work before opening debugging support."
+    });
+  }
+  if (countModulesWithPattern(coursePages, /\b(wiring|pin|connection)\b/i) >= 3) {
+    issueHints.push({
+      issue: "Wiring mistakes recur across multiple sessions.",
+      solution: "Require students to annotate each verified connection and get a peer check before upload."
+    });
+  }
+  if (countModulesWithPattern(coursePages, /\b(save|checkpoint|version)\b/i) >= 2) {
+    issueHints.push({
+      issue: "Students lose working versions after experimentation.",
+      solution: "Mandate named checkpoints after each passing milestone before extension changes."
+    });
+  }
+
+  return {
+    highlightAreas: dedupe(highlightAreas).slice(0, 5),
+    issueHints: dedupeIssues(issueHints)
+  };
+}
+
+function countModulesWithPattern(coursePages: CoursePageContext[], pattern: RegExp): number {
+  const matchedModules = new Set<number>();
+  for (const page of coursePages) {
+    if (pattern.test(page.bodyText)) {
+      matchedModules.add(page.moduleId);
+    }
+  }
+  return matchedModules.size;
+}
+
+function isSolderingContext(sessionName: string, text: string): boolean {
+  const context = `${sessionName} ${text}`.toLowerCase();
+  return /\bsolder(?:ing)?\b|\bsoldering iron\b|\bflux\b|\bcold joint\b|\bdesolder(?:ing)?\b/.test(context);
+}
+
+function buildSolderingIssues(): CommonIssue[] {
+  return [
+    {
+      issue: "Cold solder joints lead to intermittent or dead connections.",
+      solution: "Reheat each dull or cracked joint until solder flows smoothly into a shiny cone."
+    },
+    {
+      issue: "Solder bridges create short circuits between adjacent pads.",
+      solution: "Inspect with magnification and remove bridges with solder wick before power is applied."
+    },
+    {
+      issue: "Components are soldered in the wrong orientation (polarity errors).",
+      solution: "Pause before soldering and verify orientation marks for LEDs, diodes, and electrolytic capacitors."
+    },
+    {
+      issue: "Pads lift from the PCB due to overheating or repeated rework.",
+      solution: "Limit heat time per pad, use flux, and give joints time to cool between attempts."
+    },
+    {
+      issue: "Insulation melts and adjacent wires contact each other.",
+      solution: "Trim and tin wires correctly, keep exposed conductor short, and route wires with strain relief."
+    },
+    {
+      issue: "Students skip continuity checks and only discover faults at power-on.",
+      solution: "Require continuity and short-to-ground checks with a multimeter before connecting power."
+    },
+    {
+      issue: "Unsafe iron handling or fume exposure slows practical progress.",
+      solution: "Reinforce iron stand usage, cable management, and ventilation checks before soldering starts."
+    }
+  ];
 }
 
 function resolveIntroPages(
@@ -346,7 +622,9 @@ function resolveTasks(
 function findTeacherNotesInsertionPosition(items: CanvasModuleItem[]): number {
   const sorted = [...items].sort((a, b) => a.position - b.position);
   const teacherHeader = sorted.find(
-    (item) => item.type === "SubHeader" && item.title.trim().toLowerCase() === "teachers notes"
+    (item) =>
+      item.type === "SubHeader" &&
+      (normalizeLoose(item.title) === "teachers notes" || normalizeLoose(item.title) === "teacher notes")
   );
   if (teacherHeader) return teacherHeader.position + 1;
   return sorted.length === 0 ? 1 : sorted[0].position;
@@ -377,6 +655,10 @@ function dedupe(values: string[]): string[] {
     out.push(normalized);
   }
   return out;
+}
+
+function normalizeLoose(input: string): string {
+  return input.replace(SPACE_RE, " ").trim().toLowerCase();
 }
 
 function buildTaskSequenceObjective(tasks: SessionTask[]): string | undefined {
