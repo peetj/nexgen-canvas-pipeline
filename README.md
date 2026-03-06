@@ -140,6 +140,10 @@ npm run dev -- clone-survey --course-id 21 --source-title "Weekly-Check-In-Sessi
 ### Command: `teacher-notes`
 Generate teacher notes from existing session content.
 
+Behavior notes:
+- Uses whole-course session content (not just the target session module) to infer recurring teacher watchpoints.
+- Uses a strict heading template from `apps/cli/src/session/teacherNotesTemplate.ts`, including a guaranteed `Most Common Issues` section.
+
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
 - `--page-title <title>`: Required. Base title for teacher notes page.
