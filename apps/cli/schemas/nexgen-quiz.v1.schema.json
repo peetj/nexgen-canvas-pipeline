@@ -46,7 +46,7 @@
       "properties": {
         "questionCount": { "type": "integer", "const": 5 },
         "choicesPerQuestion": { "type": "integer", "const": 4 },
-        "shuffleAnswers": { "type": "boolean", "default": false },
+        "shuffleAnswers": { "type": "boolean", "default": true },
         "timeLimitMinutes": { "type": "integer", "minimum": 0, "maximum": 180 },
         "allowedAttempts": { "type": "integer", "minimum": 1, "maximum": 10 }
       }

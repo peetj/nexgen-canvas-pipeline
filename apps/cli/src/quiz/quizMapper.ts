@@ -5,6 +5,7 @@ export function mapToCanvasQuiz(quiz: NexgenQuizV1): {
     title: string;
     description?: string;
     published: boolean;
+    shuffle_answers?: boolean;
     time_limit?: number;
     allowed_attempts?: number;
   };
@@ -20,17 +21,20 @@ export function mapToCanvasQuiz(quiz: NexgenQuizV1): {
     title: quiz.title,
     description: quiz.description,
     published: false,
+    shuffle_answers: quiz.settings.shuffleAnswers === true ? true : undefined,
     time_limit: quiz.settings.timeLimitMinutes ?? undefined,
     allowed_attempts: quiz.settings.allowedAttempts ?? 1
   };
 
   const canvasQuestions = quiz.questions.map((q) => {
-    const answers = q.choices.map((text, idx) => {
-      return {
-        answer_text: text,
-        answer_weight: idx === q.correctIndex ? 100 : 0
-      };
-    });
+    const answers = q.choices.map((text, idx) => ({
+      answer_text: text,
+      answer_weight: idx === q.correctIndex ? 100 : 0
+    }));
+
+    if (quiz.settings.shuffleAnswers === true) {
+      shuffleInPlace(answers);
+    }
 
     return {
       question_name: q.id,
@@ -42,4 +46,11 @@ export function mapToCanvasQuiz(quiz: NexgenQuizV1): {
   });
 
   return { canvasQuiz, canvasQuestions };
+}
+
+function shuffleInPlace<T>(items: T[]): void {
+  for (let i = items.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [items[i], items[j]] = [items[j], items[i]];
+  }
 }

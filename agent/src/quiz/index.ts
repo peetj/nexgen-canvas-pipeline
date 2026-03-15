@@ -1,5 +1,6 @@
 type QuizRequest = {
   prompt: string;
+  difficulty?: "easy" | "medium" | "hard" | "mixed";
   schemaVersion?: string;
   settings?: {
     questionCount?: number;
@@ -107,12 +108,30 @@ function buildSystemPrompt(): string {
   ].join(" ");
 }
 
-function buildUserPrompt(payload: QuizRequest, yearLevel: { min: number; max: number }, settings: { questionCount: number; choicesPerQuestion: number }): string {
+function buildUserPrompt(
+  payload: QuizRequest,
+  yearLevel: { min: number; max: number },
+  settings: { questionCount: number; choicesPerQuestion: number }
+): string {
+  const difficultyInstruction =
+    payload.difficulty === "easy"
+      ? "Set all questions to easy difficulty and keep distractors straightforward."
+      : payload.difficulty === "medium"
+        ? "Set all questions to medium difficulty with plausible distractors and moderate reasoning."
+        : payload.difficulty === "hard"
+          ? "Set all questions to hard difficulty with stronger distractors and deeper reasoning."
+          : payload.difficulty === "mixed"
+            ? "Use a deliberate mix of easy, medium, and hard questions across the quiz."
+            : "Use your best judgment for a sensible spread of question difficulty.";
+
   return [
     `Prompt: ${payload.prompt}`,
     `Year level: ${yearLevel.min}-${yearLevel.max}.`,
     `Question count: ${settings.questionCount}.`,
     `Choices per question: ${settings.choicesPerQuestion}.`,
+    `Shuffle answers: ${payload.settings?.shuffleAnswers === true ? "yes" : "no"}.`,
+    `Difficulty preference: ${payload.difficulty ?? "unspecified"}.`,
+    difficultyInstruction,
     "Include fields:",
     "schemaVersion, title, description, topic, tags, yearLevel, settings, questions, source.",
     "source.prompt should match the prompt.",
@@ -156,6 +175,20 @@ function sanitizeTags(value: unknown): string[] | undefined {
     if (tags.length >= 12) break;
   }
   return tags.length ? tags : undefined;
+}
+
+function normalizeDifficulty(value: unknown): "easy" | "medium" | "hard" | "mixed" | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "easy" ||
+    normalized === "medium" ||
+    normalized === "hard" ||
+    normalized === "mixed"
+  ) {
+    return normalized;
+  }
+  return undefined;
 }
 
 function sanitizeQuestions(
@@ -245,12 +278,17 @@ export default {
       min: normalizeNumber(payload.yearLevel?.min, 7),
       max: normalizeNumber(payload.yearLevel?.max, 10)
     };
+    const requestedDifficulty = normalizeDifficulty(payload.difficulty);
     const settings = {
       questionCount: normalizeNumber(payload.settings?.questionCount, DEFAULT_QUESTION_COUNT),
-      choicesPerQuestion: normalizeNumber(payload.settings?.choicesPerQuestion, DEFAULT_CHOICES_PER_QUESTION)
+      choicesPerQuestion: normalizeNumber(payload.settings?.choicesPerQuestion, DEFAULT_CHOICES_PER_QUESTION),
+      shuffleAnswers: payload.settings?.shuffleAnswers === true
     };
     if (yearLevel.max < yearLevel.min) {
       return errorResponse("yearLevel.max must be >= yearLevel.min", 400);
+    }
+    if (payload.difficulty && !requestedDifficulty) {
+      return errorResponse("difficulty must be one of easy, medium, hard, or mixed", 400);
     }
 
     let text: string;
@@ -277,6 +315,13 @@ export default {
     if (!questions) {
       return errorResponse("Model returned invalid choices for one or more questions", 502);
     }
+    const normalizedQuestions =
+      requestedDifficulty && requestedDifficulty !== "mixed"
+        ? questions.map((question) => ({
+            ...question,
+            difficulty: question.difficulty ?? requestedDifficulty
+          }))
+        : questions;
 
     const sanitized: Record<string, unknown> = {
       schemaVersion,
@@ -287,9 +332,10 @@ export default {
       yearLevel,
       settings: {
         questionCount: settings.questionCount,
-        choicesPerQuestion: settings.choicesPerQuestion
+        choicesPerQuestion: settings.choicesPerQuestion,
+        shuffleAnswers: settings.shuffleAnswers
       },
-      questions,
+      questions: normalizedQuestions,
       source: {
         prompt: payload.prompt,
         generator: "cloudflare-agent",

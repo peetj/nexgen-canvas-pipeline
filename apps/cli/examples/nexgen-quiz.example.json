@@ -8,7 +8,7 @@
   "settings": {
     "questionCount": 5,
     "choicesPerQuestion": 4,
-    "shuffleAnswers": false,
+    "shuffleAnswers": true,
     "timeLimitMinutes": 6,
     "allowedAttempts": 1
   },

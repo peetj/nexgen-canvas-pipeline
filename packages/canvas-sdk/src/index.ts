@@ -25,6 +25,15 @@ export type CanvasPage = {
   published?: boolean;
 };
 
+export type CanvasFile = {
+  id: number;
+  url?: string;
+  display_name?: string;
+  filename?: string;
+  content_type?: string;
+  size?: number;
+};
+
 export type CanvasQuizSummary = {
   id: number;
   title: string;
@@ -200,6 +209,13 @@ export class CanvasClient {
     return this.request({
       method: "GET",
       path: `/api/v1/courses/${courseId}/pages/${encodeURIComponent(pageUrl)}`
+    });
+  }
+
+  async getFile(fileId: number): Promise<CanvasFile> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/files/${fileId}`
     });
   }
 

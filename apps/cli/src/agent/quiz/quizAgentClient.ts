@@ -1,6 +1,11 @@
 import { env } from "../../env.js";
 
-export async function generateQuizFromAgent(prompt: string): Promise<unknown> {
+export type QuizDifficulty = "easy" | "medium" | "hard" | "mixed";
+
+export async function generateQuizFromAgent(
+  prompt: string,
+  options?: { difficulty?: QuizDifficulty }
+): Promise<unknown> {
   if (!env.quizAgentUrl) {
     throw new Error(
       "Quiz agent URL is not set. Configure CANVAS_AGENT_URL (recommended) or QUIZ_AGENT_URL."
@@ -15,8 +20,9 @@ export async function generateQuizFromAgent(prompt: string): Promise<unknown> {
     },
     body: JSON.stringify({
       prompt,
+      difficulty: options?.difficulty,
       schemaVersion: "nexgen-quiz.v1",
-      settings: { questionCount: 5, choicesPerQuestion: 4 },
+      settings: { questionCount: 5, choicesPerQuestion: 4, shuffleAnswers: true },
       yearLevel: { min: 7, max: 10 }
     })
   });

@@ -7,6 +7,7 @@ import { validateNexgenQuiz } from "./quiz/schema/validate.js";
 import { CanvasClient } from "./canvas/canvasClient.js";
 import { mapToCanvasQuiz } from "./quiz/quizMapper.js";
 import { generateQuizFromAgent } from "./agent/quiz/quizAgentClient.js";
+import type { QuizDifficulty } from "./agent/quiz/quizAgentClient.js";
 import { generateTodayIntroFromAgent } from "./agent/sessionIntro/todayIntroAgentClient.js";
 import { buildSessionHeaderTitles, resolveModuleByName } from "./session/sessionHeaders.js";
 import { buildTeacherNotesForSession } from "./session/teacherNotes.js";
@@ -65,6 +66,19 @@ function parsePositiveInteger(input: string, fieldName: string): number {
     throw new Error(`Invalid ${fieldName}. Provide a positive integer.`);
   }
   return parsed;
+}
+
+function parseQuizDifficulty(input: string, fieldName: string): QuizDifficulty {
+  const normalized = input.trim().toLowerCase();
+  if (
+    normalized === "easy" ||
+    normalized === "medium" ||
+    normalized === "hard" ||
+    normalized === "mixed"
+  ) {
+    return normalized;
+  }
+  throw new Error(`Invalid ${fieldName}. Use one of: easy, medium, hard, mixed.`);
 }
 
 function parseRange(input: string): number[] {
@@ -216,7 +230,9 @@ type TodaySectionAssets = {
   imageUrl?: string;
   aiImagePrompt?: string;
   createdFiles: string[];
-  imageSource: "local-file" | "cli-url" | "file-url" | "none";
+  imageSource: "local-file" | "cli-url" | "file-url" | "canvas-file-id" | "none";
+  canvasImageId?: number;
+  canvasImageDisplayName?: string;
   localImagePath?: string;
   localImageOriginalBytes?: number;
   localImageOutputBytes?: number;
@@ -726,7 +742,9 @@ async function prepareTodaySectionAssets(input: {
   notesText?: string;
   notesFilePath?: string;
   imageUrl?: string;
+  imageId?: number;
   aiImagePrompt?: string;
+  client?: CanvasClient;
 }): Promise<TodaySectionAssets> {
   const folderPath = path.resolve(
     input.assetsRoot,
@@ -764,13 +782,10 @@ Write one or two short paragraphs that explain what students are doing in this s
     await fs.writeFile(notesPath, `${notesText}\n`, "utf8");
   }
 
-  let imageUrl = normalizeSingleLineInput(input.imageUrl);
-  if (!imageUrl) {
-    imageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
-  } else {
-    await fs.writeFile(imageUrlPath, `${imageUrl}\n`, "utf8");
-  }
-
+  let imageUrl: string | undefined;
+  let imageSource: TodaySectionAssets["imageSource"] = "none";
+  let canvasImageId: number | undefined;
+  let canvasImageDisplayName: string | undefined;
   const localImagePath = await findLocalImageFile(folderPath);
   let localImageOriginalBytes: number | undefined;
   let localImageOutputBytes: number | undefined;
@@ -778,23 +793,43 @@ Write one or two short paragraphs that explain what students are doing in this s
   let localImageOutputMimeType: string | undefined;
   let localImageOutputBuffer: Buffer | undefined;
   let localImageOutputFileName: string | undefined;
-  let imageSource: TodaySectionAssets["imageSource"] = "none";
-  if (localImagePath) {
-    const converted = await imageFileToDataUrl(localImagePath);
-    imageUrl = converted.dataUrl;
-    localImageOriginalBytes = converted.originalByteLength;
-    localImageOutputBytes = converted.outputByteLength;
-    localImageOptimized = converted.optimized;
-    localImageOutputMimeType = converted.outputMimeType;
-    localImageOutputBuffer = converted.outputBuffer;
-    const baseName = path.basename(localImagePath, path.extname(localImagePath));
-    const ext = extensionForMimeType(converted.outputMimeType) || path.extname(localImagePath);
-    localImageOutputFileName = `${toFilesystemSegment(baseName)}${ext}`;
-    imageSource = "local-file";
-  } else if (input.imageUrl && normalizeSingleLineInput(input.imageUrl)) {
-    imageSource = "cli-url";
-  } else if (imageUrl) {
-    imageSource = "file-url";
+  if (input.imageId !== undefined) {
+    if (!input.client) {
+      throw new Error("Canvas client is required to resolve --image-id.");
+    }
+    const canvasFile = await input.client.getFile(input.imageId);
+    if (!canvasFile.url) {
+      throw new Error(`Canvas file ${input.imageId} has no embeddable URL.`);
+    }
+    imageUrl = canvasFile.url;
+    canvasImageId = canvasFile.id;
+    canvasImageDisplayName = canvasFile.display_name ?? canvasFile.filename;
+    imageSource = "canvas-file-id";
+  } else {
+    imageUrl = normalizeSingleLineInput(input.imageUrl);
+    if (!imageUrl) {
+      imageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
+    } else {
+      await fs.writeFile(imageUrlPath, `${imageUrl}\n`, "utf8");
+    }
+
+    if (localImagePath) {
+      const converted = await imageFileToDataUrl(localImagePath);
+      imageUrl = converted.dataUrl;
+      localImageOriginalBytes = converted.originalByteLength;
+      localImageOutputBytes = converted.outputByteLength;
+      localImageOptimized = converted.optimized;
+      localImageOutputMimeType = converted.outputMimeType;
+      localImageOutputBuffer = converted.outputBuffer;
+      const baseName = path.basename(localImagePath, path.extname(localImagePath));
+      const ext = extensionForMimeType(converted.outputMimeType) || path.extname(localImagePath);
+      localImageOutputFileName = `${toFilesystemSegment(baseName)}${ext}`;
+      imageSource = "local-file";
+    } else if (input.imageUrl && normalizeSingleLineInput(input.imageUrl)) {
+      imageSource = "cli-url";
+    } else if (imageUrl) {
+      imageSource = "file-url";
+    }
   }
 
   let aiImagePrompt = normalizeSingleLineInput(input.aiImagePrompt);
@@ -811,6 +846,8 @@ Write one or two short paragraphs that explain what students are doing in this s
     aiImagePrompt,
     createdFiles,
     imageSource,
+    canvasImageId,
+    canvasImageDisplayName,
     localImagePath,
     localImageOriginalBytes,
     localImageOutputBytes,
@@ -1379,6 +1416,7 @@ program.command("create")
   .option("--course-id <id>", "Canvas course id to upload to", String(env.canvasTestCourseId))
   .option("--from-file <path>", "Load Nexgen quiz JSON from file")
   .option("--prompt <text>", "Generate quiz from agent using a prompt")
+  .option("--difficulty <level>", "Difficulty for agent-generated quiz: easy, medium, hard, or mixed")
   .option("--dry-run", "Validate and show a summary without uploading", false)
   .action(async (opts) => {
     const courseId = Number(opts.courseId);
@@ -1389,6 +1427,13 @@ program.command("create")
     if (opts.fromFile && opts.prompt) {
       throw new Error("Provide only one of --from-file or --prompt.");
     }
+    if (opts.fromFile && opts.difficulty) {
+      throw new Error("--difficulty can only be used with --prompt.");
+    }
+
+    const difficulty = opts.difficulty
+      ? parseQuizDifficulty(String(opts.difficulty), "--difficulty")
+      : undefined;
 
     let raw: unknown;
 
@@ -1396,7 +1441,7 @@ program.command("create")
       const txt = await fs.readFile(String(opts.fromFile), "utf8");
       raw = JSON.parse(txt);
     } else {
-      raw = await generateQuizFromAgent(String(opts.prompt));
+      raw = await generateQuizFromAgent(String(opts.prompt), { difficulty });
     }
 
     const quiz = validateNexgenQuiz(raw);
@@ -1405,6 +1450,9 @@ program.command("create")
     console.log(`Quiz: ${quiz.title}`);
     console.log(`Questions: ${quiz.questions.length} (expected 5)`);
     console.log(`Target course: ${courseId}`);
+    if (difficulty) {
+      console.log(`Requested difficulty: ${difficulty}`);
+    }
     if (opts.dryRun) {
       console.log("Dry run: no upload performed.");
       return;
@@ -2169,6 +2217,7 @@ program.command("today-section")
   .option("--notes <text>", "Optional raw notes text (rewritten by agent)")
   .option("--notes-file <path>", "Optional path to raw notes text/markdown (rewritten by agent)")
   .option("--image-url <url>", "Optional image URL to embed in the section")
+  .option("--image-id <id>", "Optional existing Canvas file id to embed in the section")
   .option("--ai-image-prompt <text>", "Optional AI image prompt/brief to include and save locally")
   .option("--publish", "Publish page after create/update (default is unpublished)", false)
   .option(
@@ -2186,6 +2235,9 @@ program.command("today-section")
     if (opts.notes && opts.notesFile) {
       throw new Error("Use either --notes or --notes-file, not both.");
     }
+    if (opts.imageUrl && opts.imageId) {
+      throw new Error("Use either --image-url or --image-id, not both.");
+    }
 
     const sessionName = String(opts.sessionName);
     const sessionMeta = parseSessionMetadata(sessionName);
@@ -2194,6 +2246,8 @@ program.command("today-section")
       : buildIntroductionPageTitle(sessionName);
     const shouldPublish = Boolean(opts.publish);
     const assetsRoot = path.resolve(String(opts.assetsRoot));
+    const imageId = opts.imageId ? parsePositiveInteger(String(opts.imageId), "--image-id") : undefined;
+    const client = new CanvasClient();
 
     const assets = await prepareTodaySectionAssets({
       assetsRoot,
@@ -2202,10 +2256,10 @@ program.command("today-section")
       notesText: opts.notes ? String(opts.notes) : undefined,
       notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined,
       imageUrl: opts.imageUrl ? String(opts.imageUrl) : undefined,
-      aiImagePrompt: opts.aiImagePrompt ? String(opts.aiImagePrompt) : undefined
+      imageId,
+      aiImagePrompt: opts.aiImagePrompt ? String(opts.aiImagePrompt) : undefined,
+      client
     });
-
-    const client = new CanvasClient();
     const seedBuilt = await buildWhatAreWeDoingTodaySection(client, courseId, sessionName, {
       sectionTitle: pageTitle,
       notesText: undefined,
@@ -2261,6 +2315,11 @@ program.command("today-section")
         `Image mode: local file override (${assets.localImagePath})${optimizedTag}` +
         `${before && after ? ` (${before} -> ${after})` : ""}` +
         `${assets.localImageOutputMimeType ? ` [${assets.localImageOutputMimeType}]` : ""}`
+      );
+    } else if (assets.imageSource === "canvas-file-id") {
+      console.log(
+        `Image mode: Canvas file id ${assets.canvasImageId}` +
+        `${assets.canvasImageDisplayName ? ` (${assets.canvasImageDisplayName})` : ""}`
       );
     } else if (assets.imageSource === "cli-url") {
       console.log("Image mode: --image-url input");
