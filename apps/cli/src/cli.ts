@@ -5,6 +5,7 @@ import path from "node:path";
 import { env } from "./env.js";
 import { validateNexgenQuiz } from "./quiz/schema/validate.js";
 import { CanvasClient } from "./canvas/canvasClient.js";
+import type { CanvasFolder } from "./canvas/canvasClient.js";
 import { mapToCanvasQuiz } from "./quiz/quizMapper.js";
 import { generateQuizFromAgent } from "./agent/quiz/quizAgentClient.js";
 import type { QuizDifficulty } from "./agent/quiz/quizAgentClient.js";
@@ -79,6 +80,158 @@ function parseQuizDifficulty(input: string, fieldName: string): QuizDifficulty {
     return normalized;
   }
   throw new Error(`Invalid ${fieldName}. Use one of: easy, medium, hard, mixed.`);
+}
+
+function buildDefaultCanvasCourseFilesStructure(): CanvasFolderNode[] {
+  const childNames = [
+    "teacher_notes",
+    "what_are_we_doing_today",
+    "task_a",
+    "task_b",
+    "task_c"
+  ];
+  const standardSessions = Array.from({ length: 9 }, (_, idx) => `Session_${String(idx).padStart(2, "0")}`);
+  const bonusSessions = ["BONUS_Session_09", "BONUS_Session_10"];
+
+  return [...standardSessions, ...bonusSessions].map((name) => ({
+    name,
+    children: childNames.map((child) => ({ name: child }))
+  }));
+}
+
+function parseCanvasFolderStructureInput(input: unknown): CanvasFolderNode[] {
+  let root: unknown[] | undefined;
+  if (Array.isArray(input)) {
+    root = input;
+  } else if (
+    typeof input === "object" &&
+    input !== null &&
+    Array.isArray((input as CanvasFolderStructureFile).folders)
+  ) {
+    root = (input as CanvasFolderStructureFile).folders as unknown[];
+  }
+
+  if (!root) {
+    throw new Error('Folder structure JSON must be an array or an object with a "folders" array.');
+  }
+
+  return root.map((entry, idx) => parseCanvasFolderNode(entry, `folders[${idx}]`));
+}
+
+function parseCanvasFolderNode(input: unknown, pathLabel: string): CanvasFolderNode {
+  if (typeof input === "string") {
+    return { name: validateCanvasFolderName(input, `${pathLabel}.name`) };
+  }
+
+  if (typeof input !== "object" || input === null) {
+    throw new Error(`${pathLabel} must be a string or object.`);
+  }
+
+  const record = input as Record<string, unknown>;
+  const name = validateCanvasFolderName(record.name, `${pathLabel}.name`);
+  const childrenRaw = record.children;
+  if (childrenRaw === undefined) {
+    return { name };
+  }
+  if (!Array.isArray(childrenRaw)) {
+    throw new Error(`${pathLabel}.children must be an array when provided.`);
+  }
+
+  return {
+    name,
+    children: childrenRaw.map((child, idx) => parseCanvasFolderNode(child, `${pathLabel}.children[${idx}]`))
+  };
+}
+
+function validateCanvasFolderName(input: unknown, fieldName: string): string {
+  if (typeof input !== "string") {
+    throw new Error(`${fieldName} must be a string.`);
+  }
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error(`${fieldName} cannot be empty.`);
+  }
+  if (trimmed.includes("/")) {
+    throw new Error(`${fieldName} cannot contain "/".`);
+  }
+  return trimmed;
+}
+
+function buildCanvasFolderPath(parentPath: string | undefined, folderName: string): string {
+  return parentPath ? `${parentPath}/${folderName}` : folderName;
+}
+
+async function resolveExistingCourseFolder(
+  client: CanvasClient,
+  courseId: number,
+  folderPath: string
+): Promise<CanvasFolder | undefined> {
+  try {
+    const resolved = await client.resolveCourseFolderPath(courseId, folderPath);
+    return resolved[resolved.length - 1];
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("Canvas API error 404")) {
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+async function ensureCanvasFolderTree(input: {
+  client: CanvasClient;
+  courseId: number;
+  folders: CanvasFolderNode[];
+  dryRun: boolean;
+}): Promise<{
+  createdPaths: string[];
+  existingPaths: string[];
+}> {
+  const createdPaths: string[] = [];
+  const existingPaths: string[] = [];
+
+  for (const folder of input.folders) {
+    await ensureCanvasFolderNode(
+      input.client,
+      input.courseId,
+      folder,
+      undefined,
+      input.dryRun,
+      createdPaths,
+      existingPaths
+    );
+  }
+
+  return { createdPaths, existingPaths };
+}
+
+async function ensureCanvasFolderNode(
+  client: CanvasClient,
+  courseId: number,
+  folder: CanvasFolderNode,
+  parentPath: string | undefined,
+  dryRun: boolean,
+  createdPaths: string[],
+  existingPaths: string[]
+): Promise<void> {
+  const fullPath = buildCanvasFolderPath(parentPath, folder.name);
+  const existing = await resolveExistingCourseFolder(client, courseId, fullPath);
+
+  if (existing) {
+    existingPaths.push(fullPath);
+  } else if (dryRun) {
+    createdPaths.push(fullPath);
+  } else {
+    await client.createCourseFolder(courseId, {
+      name: folder.name,
+      parentFolderPath: parentPath
+    });
+    createdPaths.push(fullPath);
+  }
+
+  for (const child of folder.children ?? []) {
+    await ensureCanvasFolderNode(client, courseId, child, fullPath, dryRun, createdPaths, existingPaths);
+  }
 }
 
 function parseRange(input: string): number[] {
@@ -276,6 +429,13 @@ type SessionMetadata = {
   sessionNumber?: number;
   sessionNumberPadded?: string;
   topic: string;
+};
+type CanvasFolderNode = {
+  name: string;
+  children?: CanvasFolderNode[];
+};
+type CanvasFolderStructureFile = {
+  folders?: unknown;
 };
 const LOCAL_IMAGE_EXTENSIONS = new Set([
   ".png",
@@ -1478,6 +1638,54 @@ program.command("create")
     const urlGuess = created.html_url ?? `${env.canvasBaseUrl}/courses/${courseId}/quizzes/${created.id}`;
     console.log(`Created quiz id: ${created.id}`);
     console.log(`Quiz URL: ${urlGuess}`);
+  });
+
+program.command("course-files-scaffold")
+  .description("Create a folder scaffold in Canvas Files for a course.")
+  .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
+  .option("--from-file <path>", "Optional JSON file describing the folder tree")
+  .option("--dry-run", "Show which Canvas folders would be created", false)
+  .action(async (opts) => {
+    const courseId = Number(opts.courseId);
+    if (!Number.isFinite(courseId)) {
+      throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+    }
+
+    let folders: CanvasFolderNode[];
+    if (opts.fromFile) {
+      const text = await fs.readFile(String(opts.fromFile), "utf8");
+      folders = parseCanvasFolderStructureInput(JSON.parse(text));
+    } else {
+      folders = buildDefaultCanvasCourseFilesStructure();
+    }
+
+    const client = new CanvasClient();
+    const result = await ensureCanvasFolderTree({
+      client,
+      courseId,
+      folders,
+      dryRun: Boolean(opts.dryRun)
+    });
+
+    console.log(`Course: ${courseId}`);
+    console.log(`Source: ${opts.fromFile ? `JSON file ${String(opts.fromFile)}` : "built-in default scaffold"}`);
+    console.log(`Folders already present: ${result.existingPaths.length}`);
+    for (const folderPath of result.existingPaths) {
+      console.log(`= ${folderPath}`);
+    }
+    if (opts.dryRun) {
+      console.log(`Folders to create: ${result.createdPaths.length}`);
+      for (const folderPath of result.createdPaths) {
+        console.log(`+ ${folderPath}`);
+      }
+      console.log("Dry run: no Canvas folders created.");
+      return;
+    }
+
+    console.log(`Folders created: ${result.createdPaths.length}`);
+    for (const folderPath of result.createdPaths) {
+      console.log(`+ ${folderPath}`);
+    }
   });
 
 program.command("session-headers")

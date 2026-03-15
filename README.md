@@ -28,6 +28,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 ## Command Summary
 ### Main CLI (`apps/cli/src/cli.ts`)
 - `create`: Creates a Canvas Classic Quiz either from a Nexgen JSON file or generated agent content. It validates the quiz structure and uploads questions to the selected course.
+- `course-files-scaffold`: Creates a Canvas Files folder scaffold in a course. It supports a built-in default session structure or a custom JSON tree.
 - `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
 - `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
 - `teacher-notes`: Builds a canonical Teacher Notes page from existing session content. In live mode it updates module placement; in draft mode it prepares a safe draft page without changing live placement.
@@ -95,6 +96,35 @@ npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" 
 
 # npm wrapper form
 npm run dev -- create -- --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
+```
+
+### Command: `course-files-scaffold`
+Create a folder scaffold in Canvas course `Files`.
+
+Options:
+- `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
+- `--from-file <path>`: Optional JSON file describing the folder tree. If omitted, the built-in default scaffold is used.
+- `--dry-run`: Preview which folders would be created without changing Canvas.
+
+Default scaffold:
+- Top level: `Session_00` to `Session_08`, plus `BONUS_Session_09` and `BONUS_Session_10`
+- Second level inside each top-level folder: `teacher_notes`, `what_are_we_doing_today`, `task_a`, `task_b`, `task_c`
+
+JSON format:
+- Either a root array of folders, or an object with a `folders` array.
+- Each folder can be a string name or an object with `name` and optional `children`.
+- Example file: `apps/cli/examples/course-files-scaffold.example.json`
+
+Examples:
+```bash
+# Preview the built-in default structure
+npx tsx apps/cli/src/cli.ts course-files-scaffold --course-id 21 --dry-run
+
+# Create the built-in default structure in Canvas Files
+npx tsx apps/cli/src/cli.ts course-files-scaffold --course-id 21
+
+# Create a custom structure from JSON
+npx tsx apps/cli/src/cli.ts course-files-scaffold --course-id 21 --from-file apps/cli/examples/course-files-scaffold.example.json
 ```
 
 ### Command: `session-headers`

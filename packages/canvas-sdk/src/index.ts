@@ -4,6 +4,12 @@ type FetchOptions = {
   body?: unknown;
 };
 
+type FormRequestOptions = {
+  method?: string;
+  path: string;
+  body: URLSearchParams;
+};
+
 export type CanvasModuleSummary = {
   id: number;
   name: string;
@@ -32,6 +38,15 @@ export type CanvasFile = {
   filename?: string;
   content_type?: string;
   size?: number;
+};
+
+export type CanvasFolder = {
+  id: number;
+  name: string;
+  full_name?: string;
+  parent_folder_id?: number | null;
+  folders_count?: number;
+  files_count?: number;
 };
 
 export type CanvasQuizSummary = {
@@ -93,6 +108,27 @@ export class CanvasClient {
       const text = await res.text().catch(() => "");
       throw new Error(
         `Canvas API error ${res.status} ${res.statusText} for ${opts.method ?? "GET"} ${opts.path}\n${text}`
+      );
+    }
+
+    return (await res.json()) as T;
+  }
+
+  private async requestForm<T>(opts: FormRequestOptions): Promise<T> {
+    const url = `${this.baseUrl}${opts.path}`;
+    const res = await fetch(url, {
+      method: opts.method ?? "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: opts.body.toString()
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(
+        `Canvas API error ${res.status} ${res.statusText} for ${opts.method ?? "POST"} ${opts.path}\n${text}`
       );
     }
 
@@ -216,6 +252,63 @@ export class CanvasClient {
     return this.request({
       method: "GET",
       path: `/api/v1/files/${fileId}`
+    });
+  }
+
+  async getCourseFolder(courseId: number, folderId: number | "root"): Promise<CanvasFolder> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/courses/${courseId}/folders/${folderId}`
+    });
+  }
+
+  async resolveCourseFolderPath(courseId: number, folderPath: string): Promise<CanvasFolder[]> {
+    const normalized = folderPath
+      .split("/")
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    const suffix = normalized.map((segment) => encodeURIComponent(segment)).join("/");
+    return this.request({
+      method: "GET",
+      path: suffix.length > 0
+        ? `/api/v1/courses/${courseId}/folders/by_path/${suffix}`
+        : `/api/v1/courses/${courseId}/folders/by_path`
+    });
+  }
+
+  async createCourseFolder(
+    courseId: number,
+    input: {
+      name: string;
+      parentFolderId?: number;
+      parentFolderPath?: string;
+      hidden?: boolean;
+      locked?: boolean;
+      position?: number;
+    }
+  ): Promise<CanvasFolder> {
+    const body = new URLSearchParams({
+      name: input.name
+    });
+    if (input.parentFolderId !== undefined) {
+      body.set("parent_folder_id", String(input.parentFolderId));
+    }
+    if (input.parentFolderPath) {
+      body.set("parent_folder_path", input.parentFolderPath);
+    }
+    if (input.hidden !== undefined) {
+      body.set("hidden", String(input.hidden));
+    }
+    if (input.locked !== undefined) {
+      body.set("locked", String(input.locked));
+    }
+    if (input.position !== undefined) {
+      body.set("position", String(input.position));
+    }
+    return this.requestForm({
+      method: "POST",
+      path: `/api/v1/courses/${courseId}/folders`,
+      body
     });
   }
 

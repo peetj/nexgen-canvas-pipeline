@@ -1,0 +1,24 @@
+{
+  "folders": [
+    {
+      "name": "Session_00",
+      "children": [
+        { "name": "teacher_notes" },
+        { "name": "what_are_we_doing_today" },
+        { "name": "task_a" },
+        { "name": "task_b" },
+        { "name": "task_c" }
+      ]
+    },
+    {
+      "name": "BONUS_Session_09",
+      "children": [
+        { "name": "teacher_notes" },
+        { "name": "what_are_we_doing_today" },
+        { "name": "task_a" },
+        { "name": "task_b" },
+        { "name": "task_c" }
+      ]
+    }
+  ]
+}
