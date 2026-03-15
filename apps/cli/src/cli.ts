@@ -15,6 +15,7 @@ import { buildTeacherNotesForSession } from "./session/teacherNotes.js";
 import {
   buildTaskASection,
   buildTaskBSection,
+  buildTaskCSection,
   type TaskACalloutStyles,
   type TaskAMediaAsset
 } from "./session/taskASection.js";
@@ -45,6 +46,7 @@ const ANSWER_READ_ONLY_FIELDS = new Set([
 const TODAY_SECTION_ASSET_TITLE = "What we are doing Today";
 const TASK_A_DEFAULT_FOLDER_NAME = "Task A";
 const TASK_B_DEFAULT_FOLDER_NAME = "TaskB";
+const TASK_C_DEFAULT_FOLDER_NAME = "TaskC";
 const NOTE_PLACEHOLDER_TOKEN = "[ADD NOTES]";
 const AI_PROMPT_PLACEHOLDER_TOKEN = "[ADD AI IMAGE PROMPT]";
 const IMAGE_URL_PLACEHOLDER_TOKEN = "https://example.com/your-image.jpg";
@@ -1039,7 +1041,7 @@ function normalizeLooseKey(input: string): string {
 async function resolveTaskFolderName(
   assetsRoot: string,
   sessionName: string,
-  taskLetter: "A" | "B",
+  taskLetter: "A" | "B" | "C",
   defaultFolderName: string,
   explicitFolderName?: string
 ): Promise<string> {
@@ -2504,6 +2506,226 @@ program.command("task-b-section")
 
     if (uploadedLocalMedia.length > 0) {
       const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_b";
+      console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
+      for (const uploaded of uploadedLocalMedia) {
+        console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
+      }
+    }
+
+    const normalize = (v: string): string => v.trim().toLowerCase();
+    const existingModulePage = built.moduleItems.find(
+      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
+    );
+
+    let pageUrl: string;
+    let createdPage = false;
+    let createdModuleItem = false;
+    let movedModuleItem = false;
+
+    if (existingModulePage?.page_url) {
+      pageUrl = existingModulePage.page_url;
+      await client.updatePage(courseId, pageUrl, {
+        title: pageTitle,
+        body: built.sectionHtml,
+        published: shouldPublish
+      });
+    } else {
+      const pages = await client.listPages(courseId, pageTitle);
+      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
+      if (existingPage) {
+        pageUrl = existingPage.url;
+        await client.updatePage(courseId, pageUrl, {
+          title: pageTitle,
+          body: built.sectionHtml,
+          published: shouldPublish
+        });
+      } else {
+        const created = await client.createPage(courseId, {
+          title: pageTitle,
+          body: built.sectionHtml,
+          published: shouldPublish
+        });
+        pageUrl = created.url;
+        createdPage = true;
+      }
+    }
+
+    const moduleItemForPage = built.moduleItems.find(
+      (item) => item.type === "Page" && item.page_url === pageUrl
+    );
+    if (!moduleItemForPage) {
+      await client.createModulePageItem(courseId, built.module.id, {
+        title: pageTitle,
+        pageUrl,
+        position: built.insertionPosition
+      });
+      createdModuleItem = true;
+    } else if (moduleItemForPage.position !== built.insertionPosition) {
+      await client.updateModuleItemPosition(
+        courseId,
+        built.module.id,
+        moduleItemForPage.id,
+        built.insertionPosition
+      );
+      movedModuleItem = true;
+    }
+
+    console.log(createdPage ? "Created page." : "Updated existing page.");
+    if (createdModuleItem) console.log("Added page to session module.");
+    if (movedModuleItem) console.log("Moved module item to target section.");
+    if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
+    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
+  });
+
+program.command("task-c-section")
+  .description("Generate or update the session page for Task C using local session-assets content.")
+  .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
+  .option("--task-folder <name>", "Task C folder name under session-assets/<session-name>")
+  .option("--page-title <title>", "Canvas page title override (default: notes.md Page Title)")
+  .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
+  .option("--notes <text>", "Optional Task C notes markdown override (saved to notes.md)")
+  .option("--notes-file <path>", "Optional Task C notes markdown file override (saved to notes.md)")
+  .option("--publish", "Publish page after create/update (default is unpublished)", false)
+  .option(
+    "--assets-root <path>",
+    "Local root for task assets",
+    path.resolve(process.cwd(), "apps", "cli", "session-assets")
+  )
+  .option("--dry-run", "Generate and preview without uploading", false)
+  .action(async (opts) => {
+    const courseId = Number(opts.courseId);
+    if (!Number.isFinite(courseId)) {
+      throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+    }
+
+    if (opts.notes && opts.notesFile) {
+      throw new Error("Use either --notes or --notes-file, not both.");
+    }
+
+    const sessionName = String(opts.sessionName);
+    const sessionMeta = parseSessionMetadata(sessionName);
+    const shouldPublish = Boolean(opts.publish);
+    const assetsRoot = path.resolve(String(opts.assetsRoot));
+    const taskFolderName = await resolveTaskFolderName(
+      assetsRoot,
+      sessionName,
+      "C",
+      TASK_C_DEFAULT_FOLDER_NAME,
+      opts.taskFolder ? String(opts.taskFolder) : undefined
+    );
+
+    const assets = await prepareTaskAAssets({
+      assetsRoot,
+      sessionName,
+      taskFolderName,
+      notesText: opts.notes ? String(opts.notes) : undefined,
+      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
+    });
+
+    const pageTitle = opts.pageTitle
+      ? String(opts.pageTitle)
+      : assets.pageTitle ?? `${sessionMeta.topic} - Task C`;
+    const taskTitle = pageTitle;
+
+    const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
+    const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
+    let uploadedLocalMediaFolderPath: string | undefined;
+
+    if (!opts.dryRun && assets.localMedia.length > 0) {
+      if (!sessionMeta.sessionNumberPadded) {
+        throw new Error(
+          `Cannot map session name "${sessionName}" to a Session_NN/task_c files folder for media upload.`
+        );
+      }
+      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_c");
+      uploadedLocalMediaFolderPath = sessionFolderPath;
+      for (const local of assets.localMedia) {
+        const fileData = Buffer.from(await fs.readFile(local.absolutePath));
+        const uploaded = await uploadFileToCanvasSessionFolder({
+          courseId,
+          sessionFolderPath,
+          fileName: local.fileName,
+          contentType: local.contentType,
+          data: fileData
+        });
+        mediaAssets.push({
+          url: uploaded.url,
+          kind: local.kind,
+          label: local.relativePath
+        });
+        uploadedLocalMedia.push({
+          source: local.relativePath,
+          uploadedUrl: uploaded.url,
+          id: uploaded.id
+        });
+      }
+    } else {
+      for (const local of assets.localMedia) {
+        mediaAssets.push({
+          url: local.relativePath,
+          kind: local.kind,
+          label: local.relativePath
+        });
+      }
+    }
+
+    const notesBody = normalizeTaskBlockText(assets.authoredBodyText ?? assets.notesText);
+    if (!notesBody) {
+      throw new Error("Task C notes.md is empty. Add student-facing content and processor tags, then retry.");
+    }
+    const mediaLookup = buildTaskAMediaLookup(mediaAssets);
+    const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
+      notesBody,
+      mediaLookup,
+      iframeTemplate: assets.iframeTemplate,
+      youtubeEmbedWidth: assets.youtubeEmbedWidth
+    });
+    const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
+
+    const client = new CanvasClient();
+    const built = await buildTaskCSection(client, courseId, sessionName, {
+      pageTitle,
+      taskTitle,
+      bodyMarkdown: finalTaskBodyMarkdown,
+      suppressTaskTitleHeading: true,
+      disableAutoMediaSection: true,
+      calloutStyles: finalCalloutStyles,
+      mediaAssets
+    });
+
+    console.log(`Course: ${courseId}`);
+    console.log(`Session module: ${built.module.name} (${built.module.id})`);
+    console.log(`Task C header: ${built.taskHeaderTitle}`);
+    console.log(`Task folder: ${taskFolderName}`);
+    console.log(`Assets folder: ${assets.folderPath}`);
+    console.log(`Page title: ${pageTitle}`);
+    console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
+    if (assets.createdFiles.length > 0) {
+      console.log("Created local asset templates:");
+      for (const createdPath of assets.createdFiles) {
+        console.log(`- ${createdPath}`);
+      }
+    }
+    console.log("Task body source: notes.md markdown/legacy compatible mode");
+    console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
+    console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
+    console.log(`Media URLs: ${assets.mediaUrls.length}`);
+    console.log(`Local media files: ${assets.localMedia.length}`);
+    console.log(`Media references resolved: ${mediaLookup.size}`);
+    console.log(`Target module position: ${built.insertionPosition}`);
+
+    if (opts.dryRun) {
+      if (assets.localMedia.length > 0) {
+        console.log("Dry run: local media files are not uploaded.");
+      }
+      console.log("Dry run: no Canvas updates performed.");
+      console.log("Generated HTML preview:");
+      console.log(built.sectionHtml.split("\n").slice(0, 60).join("\n"));
+      return;
+    }
+
+    if (uploadedLocalMedia.length > 0) {
+      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_c";
       console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
       for (const uploaded of uploadedLocalMedia) {
         console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);

@@ -44,18 +44,11 @@ export type TaskASectionBuildResult = {
 
 const TASK_A_HEADER_RE = /^session\s+\d+\s*:\s*task\s*a\b/i;
 const TASK_B_HEADER_RE = /^session\s+\d+\s*:\s*task\s*b\b/i;
+const TASK_C_HEADER_RE = /^session\s+\d+\s*:\s*task\s*c\b/i;
 const CALLOUT_LINE_RE = /^\s*(NOTE|INFO|WARNING|SUCCESS|QUESTION)\s*:\s*(.+)\s*$/i;
 
 const DEFAULT_PHILOSOPHY_TEXT =
   "Task A is the foundation task: students build core understanding with clear, achievable steps before attempting extension complexity.";
-
-const CALLOUT_DEFAULT_TITLE: Record<string, string> = {
-  info: "Info",
-  warning: "Warning",
-  success: "Success",
-  note: "Note",
-  question: "Question"
-};
 
 const BASE_TASK_A_CSS = `
 .ng-task-page {
@@ -162,6 +155,18 @@ export async function buildTaskBSection(
   return buildTaskSectionByHeader(client, courseId, sessionName, options, {
     taskLabel: "Task B",
     taskHeaderRe: TASK_B_HEADER_RE
+  });
+}
+
+export async function buildTaskCSection(
+  client: CanvasClient,
+  courseId: number,
+  sessionName: string,
+  options: TaskASectionBuildOptions
+): Promise<TaskASectionBuildResult> {
+  return buildTaskSectionByHeader(client, courseId, sessionName, options, {
+    taskLabel: "Task C",
+    taskHeaderRe: TASK_C_HEADER_RE
   });
 }
 
@@ -384,15 +389,16 @@ function renderCalloutHtml(
   body: string
 ): string {
   const normalizedKind = toCalloutKind(kind);
-  const resolvedTitle = title ?? CALLOUT_DEFAULT_TITLE[normalizedKind] ?? CALLOUT_DEFAULT_TITLE.info;
   const bodyHtml = renderMarkdown(body);
 
   return [
     `<section class="ng-task-callout ng-task-callout--${normalizedKind}">`,
-    `<h4>${escapeHtml(resolvedTitle)}</h4>`,
+    title ? `<h4>${escapeHtml(title)}</h4>` : "",
     bodyHtml,
     "</section>"
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function toCalloutKind(input: string): TaskACalloutTone {
