@@ -48,7 +48,6 @@ const TASK_B_DEFAULT_FOLDER_NAME = "TaskB";
 const NOTE_PLACEHOLDER_TOKEN = "[ADD NOTES]";
 const AI_PROMPT_PLACEHOLDER_TOKEN = "[ADD AI IMAGE PROMPT]";
 const IMAGE_URL_PLACEHOLDER_TOKEN = "https://example.com/your-image.jpg";
-const SESSION_HEADER_PREFIX = "Session ";
 const TASK_A_DEFAULT_PHILOSOPHY_TEXT =
   "Task A builds core confidence first: complete the essentials clearly and safely before moving into extension complexity.";
 
@@ -406,10 +405,11 @@ type TaskALocalMediaAsset = {
 type TaskAAssets = {
   folderPath: string;
   createdFiles: string[];
-  taskTitle?: string;
+  pageTitle?: string;
   notesText?: string;
   authoredBodyText?: string;
   iframeTemplate?: string;
+  youtubeEmbedWidth?: number;
   philosophyText: string;
   calloutStyles?: TaskACalloutStyles;
   mediaUrls: TaskAMediaAsset[];
@@ -420,6 +420,7 @@ type TaskAParsedNotes = {
   pageTitle?: string;
   authoredBodyText?: string;
   iframeTemplate?: string;
+  youtubeEmbedWidth?: number;
   philosophy?: string;
   styles?: TaskACalloutStyles;
   mediaUrls: TaskAMediaAsset[];
@@ -485,6 +486,16 @@ function parseSessionMetadata(sessionName: string): SessionMetadata {
 function buildIntroductionPageTitle(sessionName: string): string {
   const meta = parseSessionMetadata(sessionName);
   return `Introduction: ${meta.topic}`;
+}
+
+function buildCanvasSectionFilesFolderPath(
+  sessionMeta: SessionMetadata,
+  sectionFolderName: string
+): string {
+  if (!sessionMeta.sessionNumberPadded) {
+    throw new Error("Session number is required to build a Canvas Files folder path.");
+  }
+  return `Session_${sessionMeta.sessionNumberPadded}/${sectionFolderName}`;
 }
 
 async function ensureFileWithTemplate(filePath: string, content: string): Promise<boolean> {
@@ -1108,11 +1119,13 @@ async function walkTaskAAssets(
 
 function parseTaskAAuthoredNotes(notesText: string): TaskAParsedNotes {
   let working = notesText.replace(/\r\n/g, "\n");
+  const frontmatter = parseTaskAFrontmatter(working);
+  working = frontmatter.body;
   const styles = parseTaskAStylesSection(working);
   const mediaUrls = parseTaskAMediaUrlsFromText(working);
 
-  const pageHeadingMatch = working.match(/^\s*(?:\*\*|#{1,6})\s*page title\s*$/im);
-  let pageTitle: string | undefined;
+  let pageTitle = normalizeTaskInlineInput(frontmatter.pageTitle);
+  const pageHeadingMatch = pageTitle ? null : working.match(/^\s*(?:\*\*|#{1,6})\s*page title\s*$/im);
   if (pageHeadingMatch) {
     const headingIndex = pageHeadingMatch.index ?? 0;
     const before = working.slice(0, headingIndex);
@@ -1155,9 +1168,78 @@ function parseTaskAAuthoredNotes(notesText: string): TaskAParsedNotes {
     pageTitle: normalizeTaskInlineInput(pageTitle),
     authoredBodyText: normalizeTaskBlockText(working),
     iframeTemplate,
+    youtubeEmbedWidth: frontmatter.youtubeEmbedWidth,
     styles,
     mediaUrls
   };
+}
+
+function parseTaskAFrontmatter(raw: string): {
+  body: string;
+  pageTitle?: string;
+  youtubeEmbedWidth?: number;
+} {
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const match = normalized.match(/^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
+  if (!match) {
+    return { body: normalized };
+  }
+
+  const frontmatterText = match[1];
+  const body = normalized.slice(match[0].length).replace(/^\n+/, "");
+  let pageTitle: string | undefined;
+  let youtubeEmbedWidth: number | undefined;
+  let inMedia = false;
+  let inYoutube = false;
+
+  for (const rawLine of frontmatterText.split("\n")) {
+    const indent = rawLine.match(/^\s*/)?.[0].length ?? 0;
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const keyValueMatch = line.match(/^([A-Za-z0-9_]+):(?:\s*(.*))?$/);
+    if (!keyValueMatch) continue;
+
+    const key = keyValueMatch[1];
+    const value = stripMatchingQuotes((keyValueMatch[2] ?? "").trim());
+
+    if (indent === 0) {
+      inMedia = key === "media";
+      inYoutube = false;
+      if (key === "pageTitle" && value) {
+        pageTitle = value;
+      }
+      continue;
+    }
+
+    if (indent === 2 && inMedia) {
+      inYoutube = key === "youtube";
+      continue;
+    }
+
+    if (indent === 4 && inMedia && inYoutube && key === "width") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        youtubeEmbedWidth = Math.round(parsed);
+      }
+    }
+  }
+
+  return {
+    body,
+    pageTitle,
+    youtubeEmbedWidth
+  };
+}
+
+function stripMatchingQuotes(input: string): string {
+  if (
+    (input.startsWith('"') && input.endsWith('"')) ||
+    (input.startsWith("'") && input.endsWith("'"))
+  ) {
+    return input.slice(1, -1).trim();
+  }
+  return input;
 }
 
 function parseTaskAStylesSection(raw: string | undefined): TaskACalloutStyles | undefined {
@@ -1316,6 +1398,35 @@ function renderYoutubeIframe(url: string, iframeTemplate?: string): string {
   return `<iframe width="560" height="315" src="${embedUrl}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
 }
 
+function renderResponsiveYoutubeIframe(
+  url: string,
+  options: { iframeTemplate?: string; width?: number }
+): string {
+  if (options.iframeTemplate) {
+    return renderYoutubeIframe(url, options.iframeTemplate);
+  }
+
+  const embedUrl = toYouTubeEmbedUrl(url) ?? url;
+  const width = Number.isFinite(options.width) && (options.width ?? 0) > 0 ? Math.round(options.width as number) : 560;
+  const height = Math.round(width * 315 / 560);
+  return `<iframe width="${width}" height="${height}" src="${embedUrl}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
+}
+
+function isDirectVideoUrl(url: string): boolean {
+  return /\.(mp4|webm|ogg|m4v|mov)(\?.*)?$/i.test(url);
+}
+
+function toVimeoEmbedUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.toLowerCase().includes("vimeo.com")) return undefined;
+    const id = parsed.pathname.split("/").filter(Boolean)[0];
+    return id ? `https://player.vimeo.com/video/${id}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function stripCalloutPrefix(content: string, tone: string): string {
   return content.replace(new RegExp(`^\\s*${tone}\\s*:\\s*`, "i"), "").trim();
 }
@@ -1356,12 +1467,13 @@ function buildTaskMarkdownFromNotes(input: {
   notesBody: string;
   mediaLookup: Map<string, string>;
   iframeTemplate?: string;
+  youtubeEmbedWidth?: number;
 }): string {
   let output = input.notesBody;
 
   output = output
     .replace(/^\s*\*{3,}\s*(.+?)\s*$/gm, "### $1")
-    .replace(/^\s*###\s*(.+?)\s*$/gm, "### $1");
+    .replace(/^\s*###(?!#)\s*(.+?)\s*$/gm, "### $1");
 
   output = output.replace(
     /\[(NOTE|INFO|WARNING|SUCCESS|QUESTION)\]([\s\S]*?)\[\/\1\]/gi,
@@ -1384,7 +1496,10 @@ function buildTaskMarkdownFromNotes(input: {
   output = output.replace(/\[YOUTUBE_LINK\]([\s\S]*?)\[\/YOUTUBE_LINK\]/gi, (_, rawUrl: string) => {
     const url = rawUrl.trim();
     if (!url) return "";
-    return `\n\n<p>${renderYoutubeIframe(url, input.iframeTemplate)}</p>\n\n`;
+    return `\n\n<p>${renderResponsiveYoutubeIframe(url, {
+      iframeTemplate: input.iframeTemplate,
+      width: input.youtubeEmbedWidth
+    })}</p>\n\n`;
   });
 
   output = output.replace(/\[TABLE\]([\s\S]*?)\[\/TABLE\]/gi, (_, table: string) => {
@@ -1394,10 +1509,61 @@ function buildTaskMarkdownFromNotes(input: {
   output = output.replace(/\[HR\]/gi, "\n\n<hr />\n\n");
 
   output = output.replace(/\[AGENT\][\s\S]*?\[\/AGENT\]/gi, "");
+  output = replaceStandaloneMarkdownMedia(output, input);
+  output = replaceMarkdownImageReferences(output, input.mediaLookup);
   output = applyInlineProcessorTags(output);
   output = ensureMarkdownListSpacing(output);
   output = output.replace(/\n{3,}/g, "\n\n").trim();
   return output;
+}
+
+function replaceStandaloneMarkdownMedia(
+  input: string,
+  options: { iframeTemplate?: string; youtubeEmbedWidth?: number }
+): string {
+  return input
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!/^https?:\/\/\S+$/i.test(trimmed)) return line;
+
+      const youtubeEmbed = toYouTubeEmbedUrl(trimmed);
+      if (youtubeEmbed) {
+        return renderResponsiveYoutubeIframe(trimmed, {
+          iframeTemplate: options.iframeTemplate,
+          width: options.youtubeEmbedWidth
+        });
+      }
+
+      const vimeoEmbed = toVimeoEmbedUrl(trimmed);
+      if (vimeoEmbed) {
+        return `<iframe width="560" height="315" src="${vimeoEmbed}" title="Video embed" frameborder="0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>`;
+      }
+
+      if (isDirectVideoUrl(trimmed)) {
+        return `<video controls preload="metadata" src="${trimmed}"></video>`;
+      }
+
+      return line;
+    })
+    .join("\n");
+}
+
+function replaceMarkdownImageReferences(input: string, mediaLookup: Map<string, string>): string {
+  return input.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, altText: string, rawTarget: string) => {
+    const target = rawTarget.trim().replace(/^<|>$/g, "");
+    if (!target) return `![${altText}](${target})`;
+    if (/^(?:https?:|data:)/i.test(target)) {
+      return `![${altText}](${target})`;
+    }
+
+    const resolved = resolveTaskAImageUrl(target, mediaLookup);
+    if (!resolved) {
+      return `\n\n*Missing image asset: ${target}*\n\n`;
+    }
+
+    return `![${altText}](${resolved})`;
+  });
 }
 
 function renderHtmlTableFromMarkdownLikeBlock(raw: string): string {
@@ -1508,7 +1674,6 @@ async function prepareTaskAAssets(input: {
   assetsRoot: string;
   sessionName: string;
   taskFolderName: string;
-  taskTitle?: string;
   notesText?: string;
   notesFilePath?: string;
 }): Promise<TaskAAssets> {
@@ -1524,20 +1689,23 @@ async function prepareTaskAAssets(input: {
   await fs.mkdir(imagesFolderPath, { recursive: true });
 
   const createdFiles: string[] = [];
-  const notesTemplate = `** Page Title
-${NOTE_PLACEHOLDER_TOKEN}
+  const notesTemplate = `---
+pageTitle: ${NOTE_PLACEHOLDER_TOKEN}
+media:
+  youtube:
+    width: 560
+---
 
-Write student-facing content directly in this file.
+Write student-facing content directly in this file using Markdown.
 
-Processor tags:
-[IMAGE]image-file-name.jpg[/IMAGE]
-[YOUTUBE_LINK]https://youtu.be/your-video-id[/YOUTUBE_LINK]
-[NOTE]Note text[/NOTE]
-[INFO]Info text[/INFO]
-[WARNING]Warning text[/WARNING]
-[SUCCESS]Success text[/SUCCESS]
-[QUESTION]Question text[/QUESTION]
-[AGENT]Optional processor instruction (not rendered)[/AGENT]
+Examples:
+![Alt text](images/example.jpg)
+
+:::note
+Note text
+:::
+
+https://youtu.be/your-video-id
 `;
   if (await ensureFileWithTemplate(notesPath, notesTemplate)) createdFiles.push(notesPath);
 
@@ -1553,17 +1721,17 @@ Processor tags:
   }
 
   const parsed = notesText ? parseTaskAAuthoredNotes(notesText) : { mediaUrls: [] };
-  const taskTitle = normalizeTaskInlineInput(input.taskTitle) ?? parsed.pageTitle;
   const philosophyText = parsed.philosophy ?? TASK_A_DEFAULT_PHILOSOPHY_TEXT;
   const localMedia = await collectTaskALocalMedia(folderPath);
 
   return {
     folderPath,
     createdFiles,
-    taskTitle,
+    pageTitle: parsed.pageTitle,
     notesText,
     authoredBodyText: parsed.authoredBodyText,
     iframeTemplate: parsed.iframeTemplate,
+    youtubeEmbedWidth: parsed.youtubeEmbedWidth,
     philosophyText,
     calloutStyles: parsed.styles,
     mediaUrls: parsed.mediaUrls,
@@ -1971,7 +2139,6 @@ program.command("task-a-section")
   .description("Generate or update the session page for Task A using local session-assets content.")
   .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
   .option("--task-folder <name>", "Task A folder name under session-assets/<session-name>")
-  .option("--task-title <title>", "Task A title override (default: notes.md Page Title section or session topic)")
   .option("--page-title <title>", "Canvas page title override (default: notes.md Page Title)")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
   .option("--notes <text>", "Optional Task A notes markdown override (saved to notes.md)")
@@ -2009,18 +2176,14 @@ program.command("task-a-section")
       assetsRoot,
       sessionName,
       taskFolderName,
-      taskTitle: opts.taskTitle ? String(opts.taskTitle) : undefined,
       notesText: opts.notes ? String(opts.notes) : undefined,
       notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
     });
 
-    const taskTitle =
-      normalizeTaskInlineInput(opts.taskTitle ? String(opts.taskTitle) : undefined) ??
-      assets.taskTitle ??
-      `${sessionMeta.topic} - Task A`;
     const pageTitle = opts.pageTitle
       ? String(opts.pageTitle)
-      : taskTitle;
+      : assets.pageTitle ?? `${sessionMeta.topic} - Task A`;
+    const taskTitle = pageTitle;
 
     const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
     const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
@@ -2029,10 +2192,10 @@ program.command("task-a-section")
     if (!opts.dryRun && assets.localMedia.length > 0) {
       if (!sessionMeta.sessionNumberPadded) {
         throw new Error(
-          `Cannot map session name "${sessionName}" to a Session NN files folder for media upload.`
+          `Cannot map session name "${sessionName}" to a Session_NN/task_a files folder for media upload.`
         );
       }
-      const sessionFolderPath = `${SESSION_HEADER_PREFIX}${sessionMeta.sessionNumberPadded}`;
+      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_a");
       uploadedLocalMediaFolderPath = sessionFolderPath;
       for (const local of assets.localMedia) {
         const fileData = Buffer.from(await fs.readFile(local.absolutePath));
@@ -2072,7 +2235,8 @@ program.command("task-a-section")
     const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
       notesBody,
       mediaLookup,
-      iframeTemplate: assets.iframeTemplate
+      iframeTemplate: assets.iframeTemplate,
+      youtubeEmbedWidth: assets.youtubeEmbedWidth
     });
     const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
 
@@ -2092,7 +2256,6 @@ program.command("task-a-section")
     console.log(`Task A header: ${built.taskHeaderTitle}`);
     console.log(`Task folder: ${taskFolderName}`);
     console.log(`Assets folder: ${assets.folderPath}`);
-    console.log(`Task title: ${taskTitle}`);
     console.log(`Page title: ${pageTitle}`);
     console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
     if (assets.createdFiles.length > 0) {
@@ -2101,7 +2264,7 @@ program.command("task-a-section")
         console.log(`- ${createdPath}`);
       }
     }
-    console.log("Task body source: notes.md processor mode");
+    console.log("Task body source: notes.md markdown/legacy compatible mode");
     console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
     console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
     console.log(`Media URLs: ${assets.mediaUrls.length}`);
@@ -2120,7 +2283,7 @@ program.command("task-a-section")
     }
 
     if (uploadedLocalMedia.length > 0) {
-      const sessionFolderPath = uploadedLocalMediaFolderPath ?? `${SESSION_HEADER_PREFIX}[unknown]`;
+      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_a";
       console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
       for (const uploaded of uploadedLocalMedia) {
         console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
@@ -2196,7 +2359,6 @@ program.command("task-b-section")
   .description("Generate or update the session page for Task B using local session-assets content.")
   .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
   .option("--task-folder <name>", "Task B folder name under session-assets/<session-name>")
-  .option("--task-title <title>", "Task B title override (default: notes.md Page Title section or session topic)")
   .option("--page-title <title>", "Canvas page title override (default: notes.md Page Title)")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
   .option("--notes <text>", "Optional Task B notes markdown override (saved to notes.md)")
@@ -2234,18 +2396,14 @@ program.command("task-b-section")
       assetsRoot,
       sessionName,
       taskFolderName,
-      taskTitle: opts.taskTitle ? String(opts.taskTitle) : undefined,
       notesText: opts.notes ? String(opts.notes) : undefined,
       notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
     });
 
-    const taskTitle =
-      normalizeTaskInlineInput(opts.taskTitle ? String(opts.taskTitle) : undefined) ??
-      assets.taskTitle ??
-      `${sessionMeta.topic} - Task B`;
     const pageTitle = opts.pageTitle
       ? String(opts.pageTitle)
-      : taskTitle;
+      : assets.pageTitle ?? `${sessionMeta.topic} - Task B`;
+    const taskTitle = pageTitle;
 
     const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
     const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
@@ -2254,10 +2412,10 @@ program.command("task-b-section")
     if (!opts.dryRun && assets.localMedia.length > 0) {
       if (!sessionMeta.sessionNumberPadded) {
         throw new Error(
-          `Cannot map session name "${sessionName}" to a Session NN files folder for media upload.`
+          `Cannot map session name "${sessionName}" to a Session_NN/task_b files folder for media upload.`
         );
       }
-      const sessionFolderPath = `${SESSION_HEADER_PREFIX}${sessionMeta.sessionNumberPadded}`;
+      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_b");
       uploadedLocalMediaFolderPath = sessionFolderPath;
       for (const local of assets.localMedia) {
         const fileData = Buffer.from(await fs.readFile(local.absolutePath));
@@ -2297,7 +2455,8 @@ program.command("task-b-section")
     const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
       notesBody,
       mediaLookup,
-      iframeTemplate: assets.iframeTemplate
+      iframeTemplate: assets.iframeTemplate,
+      youtubeEmbedWidth: assets.youtubeEmbedWidth
     });
     const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
 
@@ -2317,7 +2476,6 @@ program.command("task-b-section")
     console.log(`Task B header: ${built.taskHeaderTitle}`);
     console.log(`Task folder: ${taskFolderName}`);
     console.log(`Assets folder: ${assets.folderPath}`);
-    console.log(`Task title: ${taskTitle}`);
     console.log(`Page title: ${pageTitle}`);
     console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
     if (assets.createdFiles.length > 0) {
@@ -2326,7 +2484,7 @@ program.command("task-b-section")
         console.log(`- ${createdPath}`);
       }
     }
-    console.log("Task body source: notes.md processor mode");
+    console.log("Task body source: notes.md markdown/legacy compatible mode");
     console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
     console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
     console.log(`Media URLs: ${assets.mediaUrls.length}`);
@@ -2345,7 +2503,7 @@ program.command("task-b-section")
     }
 
     if (uploadedLocalMedia.length > 0) {
-      const sessionFolderPath = uploadedLocalMediaFolderPath ?? `${SESSION_HEADER_PREFIX}[unknown]`;
+      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_b";
       console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
       for (const uploaded of uploadedLocalMedia) {
         console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
@@ -2553,10 +2711,10 @@ program.command("today-section")
     if (assets.imageSource === "local-file" && assets.localImageOutputBuffer && assets.localImageOutputMimeType) {
       if (!sessionMeta.sessionNumberPadded) {
         throw new Error(
-          `Cannot map session name "${sessionName}" to a Session NN files folder for image upload.`
+          `Cannot map session name "${sessionName}" to a Session_NN/what_are_we_doing_today files folder for image upload.`
         );
       }
-      const sessionFolderPath = `${SESSION_HEADER_PREFIX}${sessionMeta.sessionNumberPadded}`;
+      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "what_are_we_doing_today");
       const uploadName =
         assets.localImageOutputFileName ??
         `intro-${sessionMeta.sessionNumberPadded}${extensionForMimeType(assets.localImageOutputMimeType)}`;

@@ -44,7 +44,6 @@ export type TaskASectionBuildResult = {
 
 const TASK_A_HEADER_RE = /^session\s+\d+\s*:\s*task\s*a\b/i;
 const TASK_B_HEADER_RE = /^session\s+\d+\s*:\s*task\s*b\b/i;
-const CALLOUT_RE = /:::(info|warning|success|note|question)(?:\s+([^\n]+))?\n([\s\S]*?)\n:::/gi;
 const CALLOUT_LINE_RE = /^\s*(NOTE|INFO|WARNING|SUCCESS|QUESTION)\s*:\s*(.+)\s*$/i;
 
 const DEFAULT_PHILOSOPHY_TEXT =
@@ -306,38 +305,77 @@ function renderMarkdownWithCallouts(input: string, calloutStyles: TaskACalloutSt
   if (!source) return "";
 
   const callouts: Array<{ kind: string; title?: string; body: string }> = [];
-  const markdownCalloutTokenized = source.replace(
-    CALLOUT_RE,
-    (_, kind: string, title: string | undefined, body: string) => {
-      const index = callouts.length;
-      callouts.push({ kind: kind.toLowerCase(), title: normalizeOptionalText(title), body });
-      return `\n@@NG_CALLOUT_${index}@@\n`;
-    }
-  );
-
-  const tokenized = markdownCalloutTokenized
-    .split(/\r?\n/)
-    .map((line) => {
-      const match = line.match(CALLOUT_LINE_RE);
-      if (!match) return line;
-      const index = callouts.length;
-      callouts.push({
-        kind: match[1].toLowerCase(),
-        title: match[1].toUpperCase(),
-        body: match[2]
-      });
-      return `@@NG_CALLOUT_${index}@@`;
-    })
-    .join("\n");
+  const tokenized = tokenizeCalloutMarkdown(source, callouts);
 
   let html = renderMarkdown(tokenized);
   for (let i = 0; i < callouts.length; i += 1) {
     const token = `@@NG_CALLOUT_${i}@@`;
     const callout = callouts[i];
     const rendered = renderCalloutHtml(callout.kind, callout.title, callout.body);
+    html = html.replace(new RegExp(`<p>\\s*${escapeRegExp(token)}\\s*<\\/p>`, "g"), rendered);
     html = html.replace(token, rendered);
   }
   return html;
+}
+
+function tokenizeCalloutMarkdown(
+  source: string,
+  callouts: Array<{ kind: string; title?: string; body: string }>
+): string {
+  const lines = source.split(/\r?\n/);
+  const out: string[] = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const directiveMatch = line.trim().match(/^:::(info|warning|success|note|question)(?:\s+(.+))?$/i);
+    if (directiveMatch) {
+      const kind = directiveMatch[1].toLowerCase();
+      const title = normalizeOptionalText(directiveMatch[2]);
+      const bodyLines: string[] = [];
+      let closed = false;
+
+      for (i += 1; i < lines.length; i += 1) {
+        if (lines[i].trim() === ":::") {
+          closed = true;
+          break;
+        }
+        bodyLines.push(lines[i]);
+      }
+
+      if (!closed) {
+        out.push(line);
+        out.push(...bodyLines);
+        break;
+      }
+
+      const index = callouts.length;
+      callouts.push({
+        kind,
+        title,
+        body: bodyLines.join("\n").trim()
+      });
+      out.push("");
+      out.push(`@@NG_CALLOUT_${index}@@`);
+      out.push("");
+      continue;
+    }
+
+    const inlineMatch = line.match(CALLOUT_LINE_RE);
+    if (inlineMatch) {
+      const index = callouts.length;
+      callouts.push({
+        kind: inlineMatch[1].toLowerCase(),
+        title: inlineMatch[1].toUpperCase(),
+        body: inlineMatch[2]
+      });
+      out.push(`@@NG_CALLOUT_${index}@@`);
+      continue;
+    }
+
+    out.push(line);
+  }
+
+  return out.join("\n");
 }
 
 function renderCalloutHtml(
@@ -547,4 +585,8 @@ function escapeHtml(input: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

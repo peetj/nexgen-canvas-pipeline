@@ -32,8 +32,8 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 - `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
 - `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
 - `teacher-notes`: Builds a canonical Teacher Notes page from existing session content. In live mode it updates module placement; in draft mode it prepares a safe draft page without changing live placement.
-- `task-a-section`: Builds/updates a Task A page from `session-assets/<session>/<task-folder>/notes.md` and local media, applying processor tags and placing it under the `Session NN: Task A` header.
-- `today-section`: Builds/updates the session introduction page for the `What we are doing Today` section. It rewrites notes via the intro agent, uploads local images to Canvas Files (`Session NN`), then applies final HTML.
+- `task-a-section`: Builds/updates a Task A page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task A` header and uploading local media to Canvas Files under `Session_NN/task_a`.
+- `today-section`: Builds/updates the session introduction page for the `What we are doing Today` section. It rewrites notes via the intro agent, uploads local images to Canvas Files under `Session_NN/what_are_we_doing_today`, then applies final HTML.
 
 ### Plugins Runner (`apps/plugins-runner/src/cli.ts`)
 - `list`: Shows available reusable Canvas workflow plugins that can be executed by the runner.
@@ -69,7 +69,7 @@ Use either invocation style:
 Run once before direct mode (or whenever `packages/canvas-sdk/src` changes):
 `npm run -w @nexgen/canvas-sdk build`
 2. npm script wrapper:
-`npm run dev -- <command> -- [options]`
+`npm run dev -- <command> [options]`
 
 ### Command: `create`
 Create a quiz in Canvas from a JSON file or from an agent prompt.
@@ -95,7 +95,7 @@ npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" 
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --difficulty hard --course-id 12345 --dry-run
 
 # npm wrapper form
-npm run dev -- create -- --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
+npm run dev -- create --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
 ```
 
 ### Command: `course-files-scaffold`
@@ -141,7 +141,7 @@ Example:
 npx tsx apps/cli/src/cli.ts session-headers --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
 
 # npm wrapper form
-npm run dev -- session-headers -- --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
+npm run dev -- session-headers --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
 ```
 
 ### Command: `clone-survey`
@@ -208,7 +208,7 @@ npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session
 npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad"
 
 # npm wrapper form
-npm run dev -- teacher-notes -- --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
+npm run dev -- teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
 ```
 
 ### Command: `task-a-section`
@@ -217,8 +217,7 @@ Generate/update the `Task A` page from local session assets.
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
 - `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `Task A`.
-- `--task-title <title>`: Optional Task A title override (otherwise read from `notes.md` `** Page Title` section).
-- `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` page title.
+- `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` `pageTitle` frontmatter value.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
 - `--notes-file <path>`: Optional notes markdown file override (saved to `notes.md`).
@@ -230,11 +229,18 @@ Task A asset skeleton (auto-created if missing):
 - `notes.md` only (single source of truth)
 - `images/` folder (for local image/video assets)
 
-`notes.md` processor tags:
+`notes.md` authoring:
+- Preferred format is Markdown-first with `pageTitle` in frontmatter.
+- Legacy processor tags still work during migration.
+
+Legacy `notes.md` processor tags:
 - `[IMAGE]file-name.jpg[/IMAGE]`
 - `[YOUTUBE_LINK]https://youtu.be/...[/YOUTUBE_LINK]`
 - `[NOTE]...[/NOTE]`, `[INFO]...[/INFO]`, `[WARNING]...[/WARNING]`, `[SUCCESS]...[/SUCCESS]`, `[QUESTION]...[/QUESTION]`
 - `[AGENT]...[/AGENT]` (processor instruction only, not rendered)
+
+Markdown-first reference example:
+- See `docs/task-a-canonical-markdown-example.md` for a proposed canonical format based on `Session 05 - Soldering / TaskA / notes.md`.
 
 Formatting behavior:
 - `*** Heading` lines are converted to `<h3>`.
@@ -245,7 +251,7 @@ Use quotes around these values in `.env` so `#` color values parse correctly.
 
 Local media behavior:
 - Image/video files placed anywhere inside the Task A folder (including `images/`) are auto-detected.
-- In non-dry-run mode they are uploaded to Canvas Files folder `Session NN` and embedded in the page.
+- In non-dry-run mode they are uploaded to Canvas Files folder `Session_NN/task_a` and embedded in the page.
 - In dry-run mode they are discovered but not uploaded.
 
 Examples:
@@ -287,7 +293,7 @@ Notes:
 - You can also place a local image file directly in that same folder (`image.png`, `image.jpg`, etc.).
 - If `--image-id` is not used, local image file takes priority over `--image-url` and `image-url.txt`.
 - Oversized local image files are auto-optimized (resize/compress) to keep web payloads controlled (target <= `450 KB`).
-- On publish, local image files are uploaded to Canvas Files in `Session NN` first, then the page HTML is updated to use that uploaded file URL.
+- On publish, local image files are uploaded to Canvas Files in `Session_NN/what_are_we_doing_today` first, then the page HTML is updated to use that uploaded file URL.
 - Intro text is generated by the intro endpoint (`/today-intro`), not copied verbatim from notes.
 - Ensure the deployed canvas agent supports `POST /today-intro`.
 
@@ -329,8 +335,8 @@ npx tsx apps/plugins-runner/src/cli.ts run --plugin reveal-answer --arg "mode=bo
 Workspace script invocation:
 ```bash
 npm run plugins:dev -- list
-npm run plugins:dev -- run -- --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
-npm run plugins:dev -- run -- --plugin reveal-answer --arg "answer=Your answer text"
+npm run plugins:dev -- run --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
+npm run plugins:dev -- run --plugin reveal-answer --arg "answer=Your answer text"
 ```
 
 `reveal-answer` packaging notes:
