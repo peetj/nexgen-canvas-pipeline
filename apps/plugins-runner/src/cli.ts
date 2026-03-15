@@ -5,7 +5,7 @@ const program = new Command();
 
 type RunOptions = {
   plugin: string;
-  courseId: string;
+  courseId?: string;
   arg: string[];
   dryRun: boolean;
 };
@@ -43,7 +43,8 @@ program
     }
     console.log("Available plugins:");
     for (const plugin of plugins) {
-      console.log(`- ${plugin.id}: ${plugin.description}`);
+      const requiresCanvas = plugin.requiresCanvas !== false ? "requires Canvas" : "standalone";
+      console.log(`- ${plugin.id}: ${plugin.description} [${requiresCanvas}]`);
     }
   });
 
@@ -51,13 +52,16 @@ program
   .command("run")
   .description("Run a plugin.")
   .requiredOption("--plugin <id>", "Plugin id to run")
-  .requiredOption("--course-id <id>", "Canvas course id")
+  .option("--course-id <id>", "Canvas course id (required for Canvas-backed plugins)")
   .option("--arg <key=value>", "Plugin argument (repeatable)", (value, prev: string[]) => [...prev, value], [])
   .option("--dry-run", "Run in dry-run mode", false)
   .action(async (opts: RunOptions) => {
-    const courseId = Number(opts.courseId);
-    if (!Number.isFinite(courseId)) {
-      throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+    let courseId: number | undefined;
+    if (opts.courseId !== undefined) {
+      courseId = Number(opts.courseId);
+      if (!Number.isFinite(courseId)) {
+        throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+      }
     }
 
     const args = parseArgs(opts.arg ?? []);
@@ -69,7 +73,7 @@ program
     });
 
     console.log(`Plugin: ${opts.plugin}`);
-    console.log(`Course: ${courseId}`);
+    console.log(`Course: ${courseId ?? "n/a"}`);
     console.log(`Dry run: ${opts.dryRun ? "yes" : "no"}`);
     console.log(`Summary: ${result.summary}`);
     if (result.details !== undefined) {

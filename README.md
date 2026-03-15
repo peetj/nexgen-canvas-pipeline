@@ -36,7 +36,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 
 ### Plugins Runner (`apps/plugins-runner/src/cli.ts`)
 - `list`: Shows available reusable Canvas workflow plugins that can be executed by the runner.
-- `run`: Executes a selected plugin against a target course with optional plugin arguments for scoped behavior.
+- `run`: Executes a selected plugin. Canvas-backed plugins require `--course-id`; standalone plugins (for example `reveal-answer`) do not.
 
 ## Config
 All non-secret settings live in `apps/cli/config/nexgen-canvas-pipeline.config.json`. For session headers, edit
@@ -274,16 +274,30 @@ npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session
 
 ### Plugins Runner
 Use this for reusable, composable Canvas workflows implemented as plugins.
+Reveal-answer plugin guide: `docs/reveal-answer-plugin.md`.
+Canvas External App (LTI 1.3) guide: `docs/canvas-external-app-reveal-answer.md`.
 
 Direct invocation:
 ```bash
 npx tsx apps/plugins-runner/src/cli.ts list
 npx tsx apps/plugins-runner/src/cli.ts run --plugin module-overview --course-id 21
 npx tsx apps/plugins-runner/src/cli.ts run --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
+npx tsx apps/plugins-runner/src/cli.ts run --plugin reveal-answer --arg "question=What is Ohm's Law?" --arg "answer=V = I * R"
+npx tsx apps/plugins-runner/src/cli.ts run --plugin reveal-answer --arg "mode=both" --arg "answer=Your answer text" --arg "outDir=dist/reveal-answer-package"
 ```
 
 Workspace script invocation:
 ```bash
 npm run plugins:dev -- list
-npm run plugins:dev -- run --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
+npm run plugins:dev -- run -- --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
+npm run plugins:dev -- run -- --plugin reveal-answer --arg "answer=Your answer text"
 ```
+
+`reveal-answer` packaging notes:
+- Use `--arg outDir=<folder>` to generate a shareable folder with:
+  - `reveal-answer.basic.html` (highest Canvas sanitizer compatibility)
+  - `reveal-answer.enhanced.html` (open/close icon and pill state swap via `<style>`)
+  - `reveal-answer.args.example.json` (editable parameter template)
+  - `README.md` (Canvas install steps for others)
+- Run with `--dry-run` to preview output paths without writing files.
+- Fully parameterized text/design args are exposed in the command result under `parameterReference`.

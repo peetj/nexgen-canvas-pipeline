@@ -5,3 +5,12 @@ compatibility_date = "2024-10-01"
 [vars]
 AGENT_API_KEY = ""
 OPENAI_MODEL = "gpt-4o-mini"
+LTI_TOOL_CLIENT_ID = "10000000000005"
+LTI_TOOL_KID = "reveal-answer-key"
+LTI_ALLOWED_ISSUERS = "https://canvas.instructure.com,https://canvas.beta.instructure.com,https://canvas.test.instructure.com"
+LTI_TOOL_TITLE = "Nexgen Reveal Answer"
+LTI_TOOL_DESCRIPTION = "Insert a Canvas-ready reveal answer block."
+# Recommended: set these via `wrangler secret put` in each environment.
+# LTI_TOOL_PRIVATE_JWK = ""
+# LTI_TOOL_PUBLIC_JWK = ""
+# LTI_STATE_SECRET = ""

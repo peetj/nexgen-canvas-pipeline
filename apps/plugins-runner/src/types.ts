@@ -6,8 +6,8 @@ export type PluginResult = {
 };
 
 export type PluginContext = {
-  canvas: CanvasClient;
-  courseId: number;
+  canvas: CanvasClient | null;
+  courseId: number | null;
   dryRun: boolean;
   args: Record<string, string>;
   log: (message: string) => void;
@@ -16,5 +16,6 @@ export type PluginContext = {
 export type CanvasPlugin = {
   id: string;
   description: string;
+  requiresCanvas?: boolean;
   run: (ctx: PluginContext) => Promise<PluginResult>;
 };

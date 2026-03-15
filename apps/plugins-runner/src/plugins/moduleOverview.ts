@@ -37,7 +37,12 @@ export const moduleOverviewPlugin: CanvasPlugin = {
   id: "module-overview",
   description:
     "Read-only summary of course modules. Optionally pass moduleName to inspect one module in detail.",
+  requiresCanvas: true,
   async run(ctx) {
+    if (!ctx.canvas || ctx.courseId === null) {
+      throw new Error('Plugin "module-overview" requires Canvas context.');
+    }
+
     const moduleName = ctx.args.moduleName;
     const modules = await ctx.canvas.listModules(ctx.courseId, moduleName);
 

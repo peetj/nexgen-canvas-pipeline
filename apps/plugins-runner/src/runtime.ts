@@ -1,5 +1,5 @@
 import { CanvasClient } from "@nexgen/canvas-sdk";
-import { env } from "./env.js";
+import { getCanvasEnv } from "./env.js";
 import { pluginsById } from "./plugins/index.js";
 import type { CanvasPlugin, PluginContext, PluginResult } from "./types.js";
 
@@ -18,18 +18,27 @@ export function resolvePlugin(pluginId: string): CanvasPlugin {
 
 export async function runPlugin(input: {
   pluginId: string;
-  courseId: number;
+  courseId?: number;
   dryRun: boolean;
   args: Record<string, string>;
   log?: (message: string) => void;
 }): Promise<PluginResult> {
   const plugin = resolvePlugin(input.pluginId);
-  const canvas = new CanvasClient(env.canvasBaseUrl, env.canvasApiToken);
   const logger = input.log ?? console.log;
+  const requiresCanvas = plugin.requiresCanvas !== false;
+
+  let canvas: CanvasClient | null = null;
+  if (requiresCanvas) {
+    if (!Number.isFinite(input.courseId)) {
+      throw new Error(`Plugin "${plugin.id}" requires --course-id <id>.`);
+    }
+    const env = getCanvasEnv();
+    canvas = new CanvasClient(env.canvasBaseUrl, env.canvasApiToken);
+  }
 
   const ctx: PluginContext = {
     canvas,
-    courseId: input.courseId,
+    courseId: Number.isFinite(input.courseId) ? Number(input.courseId) : null,
     dryRun: input.dryRun,
     args: input.args,
     log: logger
