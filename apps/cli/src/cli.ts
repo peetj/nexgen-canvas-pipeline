@@ -5,14 +5,17 @@ import path from "node:path";
 import { env } from "./env.js";
 import { validateNexgenQuiz } from "./quiz/schema/validate.js";
 import { CanvasClient } from "./canvas/canvasClient.js";
+import type { CanvasFolder } from "./canvas/canvasClient.js";
 import { mapToCanvasQuiz } from "./quiz/quizMapper.js";
 import { generateQuizFromAgent } from "./agent/quiz/quizAgentClient.js";
+import type { QuizDifficulty } from "./agent/quiz/quizAgentClient.js";
 import { generateTodayIntroFromAgent } from "./agent/sessionIntro/todayIntroAgentClient.js";
 import { buildSessionHeaderTitles, resolveModuleByName } from "./session/sessionHeaders.js";
 import { buildTeacherNotesForSession } from "./session/teacherNotes.js";
 import {
   buildTaskASection,
   buildTaskBSection,
+  buildTaskCSection,
   type TaskACalloutStyles,
   type TaskAMediaAsset
 } from "./session/taskASection.js";
@@ -43,10 +46,10 @@ const ANSWER_READ_ONLY_FIELDS = new Set([
 const TODAY_SECTION_ASSET_TITLE = "What we are doing Today";
 const TASK_A_DEFAULT_FOLDER_NAME = "Task A";
 const TASK_B_DEFAULT_FOLDER_NAME = "TaskB";
+const TASK_C_DEFAULT_FOLDER_NAME = "TaskC";
 const NOTE_PLACEHOLDER_TOKEN = "[ADD NOTES]";
 const AI_PROMPT_PLACEHOLDER_TOKEN = "[ADD AI IMAGE PROMPT]";
 const IMAGE_URL_PLACEHOLDER_TOKEN = "https://example.com/your-image.jpg";
-const SESSION_HEADER_PREFIX = "Session ";
 const TASK_A_DEFAULT_PHILOSOPHY_TEXT =
   "Task A builds core confidence first: complete the essentials clearly and safely before moving into extension complexity.";
 
@@ -65,6 +68,171 @@ function parsePositiveInteger(input: string, fieldName: string): number {
     throw new Error(`Invalid ${fieldName}. Provide a positive integer.`);
   }
   return parsed;
+}
+
+function parseQuizDifficulty(input: string, fieldName: string): QuizDifficulty {
+  const normalized = input.trim().toLowerCase();
+  if (
+    normalized === "easy" ||
+    normalized === "medium" ||
+    normalized === "hard" ||
+    normalized === "mixed"
+  ) {
+    return normalized;
+  }
+  throw new Error(`Invalid ${fieldName}. Use one of: easy, medium, hard, mixed.`);
+}
+
+function buildDefaultCanvasCourseFilesStructure(): CanvasFolderNode[] {
+  const childNames = [
+    "teacher_notes",
+    "what_are_we_doing_today",
+    "task_a",
+    "task_b",
+    "task_c"
+  ];
+  const standardSessions = Array.from({ length: 9 }, (_, idx) => `Session_${String(idx).padStart(2, "0")}`);
+  const bonusSessions = ["BONUS_Session_09", "BONUS_Session_10"];
+
+  return [...standardSessions, ...bonusSessions].map((name) => ({
+    name,
+    children: childNames.map((child) => ({ name: child }))
+  }));
+}
+
+function parseCanvasFolderStructureInput(input: unknown): CanvasFolderNode[] {
+  let root: unknown[] | undefined;
+  if (Array.isArray(input)) {
+    root = input;
+  } else if (
+    typeof input === "object" &&
+    input !== null &&
+    Array.isArray((input as CanvasFolderStructureFile).folders)
+  ) {
+    root = (input as CanvasFolderStructureFile).folders as unknown[];
+  }
+
+  if (!root) {
+    throw new Error('Folder structure JSON must be an array or an object with a "folders" array.');
+  }
+
+  return root.map((entry, idx) => parseCanvasFolderNode(entry, `folders[${idx}]`));
+}
+
+function parseCanvasFolderNode(input: unknown, pathLabel: string): CanvasFolderNode {
+  if (typeof input === "string") {
+    return { name: validateCanvasFolderName(input, `${pathLabel}.name`) };
+  }
+
+  if (typeof input !== "object" || input === null) {
+    throw new Error(`${pathLabel} must be a string or object.`);
+  }
+
+  const record = input as Record<string, unknown>;
+  const name = validateCanvasFolderName(record.name, `${pathLabel}.name`);
+  const childrenRaw = record.children;
+  if (childrenRaw === undefined) {
+    return { name };
+  }
+  if (!Array.isArray(childrenRaw)) {
+    throw new Error(`${pathLabel}.children must be an array when provided.`);
+  }
+
+  return {
+    name,
+    children: childrenRaw.map((child, idx) => parseCanvasFolderNode(child, `${pathLabel}.children[${idx}]`))
+  };
+}
+
+function validateCanvasFolderName(input: unknown, fieldName: string): string {
+  if (typeof input !== "string") {
+    throw new Error(`${fieldName} must be a string.`);
+  }
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error(`${fieldName} cannot be empty.`);
+  }
+  if (trimmed.includes("/")) {
+    throw new Error(`${fieldName} cannot contain "/".`);
+  }
+  return trimmed;
+}
+
+function buildCanvasFolderPath(parentPath: string | undefined, folderName: string): string {
+  return parentPath ? `${parentPath}/${folderName}` : folderName;
+}
+
+async function resolveExistingCourseFolder(
+  client: CanvasClient,
+  courseId: number,
+  folderPath: string
+): Promise<CanvasFolder | undefined> {
+  try {
+    const resolved = await client.resolveCourseFolderPath(courseId, folderPath);
+    return resolved[resolved.length - 1];
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("Canvas API error 404")) {
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+async function ensureCanvasFolderTree(input: {
+  client: CanvasClient;
+  courseId: number;
+  folders: CanvasFolderNode[];
+  dryRun: boolean;
+}): Promise<{
+  createdPaths: string[];
+  existingPaths: string[];
+}> {
+  const createdPaths: string[] = [];
+  const existingPaths: string[] = [];
+
+  for (const folder of input.folders) {
+    await ensureCanvasFolderNode(
+      input.client,
+      input.courseId,
+      folder,
+      undefined,
+      input.dryRun,
+      createdPaths,
+      existingPaths
+    );
+  }
+
+  return { createdPaths, existingPaths };
+}
+
+async function ensureCanvasFolderNode(
+  client: CanvasClient,
+  courseId: number,
+  folder: CanvasFolderNode,
+  parentPath: string | undefined,
+  dryRun: boolean,
+  createdPaths: string[],
+  existingPaths: string[]
+): Promise<void> {
+  const fullPath = buildCanvasFolderPath(parentPath, folder.name);
+  const existing = await resolveExistingCourseFolder(client, courseId, fullPath);
+
+  if (existing) {
+    existingPaths.push(fullPath);
+  } else if (dryRun) {
+    createdPaths.push(fullPath);
+  } else {
+    await client.createCourseFolder(courseId, {
+      name: folder.name,
+      parentFolderPath: parentPath
+    });
+    createdPaths.push(fullPath);
+  }
+
+  for (const child of folder.children ?? []) {
+    await ensureCanvasFolderNode(client, courseId, child, fullPath, dryRun, createdPaths, existingPaths);
+  }
 }
 
 function parseRange(input: string): number[] {
@@ -216,7 +384,9 @@ type TodaySectionAssets = {
   imageUrl?: string;
   aiImagePrompt?: string;
   createdFiles: string[];
-  imageSource: "local-file" | "cli-url" | "file-url" | "none";
+  imageSource: "local-file" | "cli-url" | "file-url" | "canvas-file-id" | "none";
+  canvasImageId?: number;
+  canvasImageDisplayName?: string;
   localImagePath?: string;
   localImageOriginalBytes?: number;
   localImageOutputBytes?: number;
@@ -237,10 +407,11 @@ type TaskALocalMediaAsset = {
 type TaskAAssets = {
   folderPath: string;
   createdFiles: string[];
-  taskTitle?: string;
+  pageTitle?: string;
   notesText?: string;
   authoredBodyText?: string;
   iframeTemplate?: string;
+  youtubeEmbedWidth?: number;
   philosophyText: string;
   calloutStyles?: TaskACalloutStyles;
   mediaUrls: TaskAMediaAsset[];
@@ -251,6 +422,7 @@ type TaskAParsedNotes = {
   pageTitle?: string;
   authoredBodyText?: string;
   iframeTemplate?: string;
+  youtubeEmbedWidth?: number;
   philosophy?: string;
   styles?: TaskACalloutStyles;
   mediaUrls: TaskAMediaAsset[];
@@ -260,6 +432,13 @@ type SessionMetadata = {
   sessionNumber?: number;
   sessionNumberPadded?: string;
   topic: string;
+};
+type CanvasFolderNode = {
+  name: string;
+  children?: CanvasFolderNode[];
+};
+type CanvasFolderStructureFile = {
+  folders?: unknown;
 };
 const LOCAL_IMAGE_EXTENSIONS = new Set([
   ".png",
@@ -309,6 +488,16 @@ function parseSessionMetadata(sessionName: string): SessionMetadata {
 function buildIntroductionPageTitle(sessionName: string): string {
   const meta = parseSessionMetadata(sessionName);
   return `Introduction: ${meta.topic}`;
+}
+
+function buildCanvasSectionFilesFolderPath(
+  sessionMeta: SessionMetadata,
+  sectionFolderName: string
+): string {
+  if (!sessionMeta.sessionNumberPadded) {
+    throw new Error("Session number is required to build a Canvas Files folder path.");
+  }
+  return `Session_${sessionMeta.sessionNumberPadded}/${sectionFolderName}`;
 }
 
 async function ensureFileWithTemplate(filePath: string, content: string): Promise<boolean> {
@@ -726,7 +915,9 @@ async function prepareTodaySectionAssets(input: {
   notesText?: string;
   notesFilePath?: string;
   imageUrl?: string;
+  imageId?: number;
   aiImagePrompt?: string;
+  client?: CanvasClient;
 }): Promise<TodaySectionAssets> {
   const folderPath = path.resolve(
     input.assetsRoot,
@@ -764,13 +955,10 @@ Write one or two short paragraphs that explain what students are doing in this s
     await fs.writeFile(notesPath, `${notesText}\n`, "utf8");
   }
 
-  let imageUrl = normalizeSingleLineInput(input.imageUrl);
-  if (!imageUrl) {
-    imageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
-  } else {
-    await fs.writeFile(imageUrlPath, `${imageUrl}\n`, "utf8");
-  }
-
+  let imageUrl: string | undefined;
+  let imageSource: TodaySectionAssets["imageSource"] = "none";
+  let canvasImageId: number | undefined;
+  let canvasImageDisplayName: string | undefined;
   const localImagePath = await findLocalImageFile(folderPath);
   let localImageOriginalBytes: number | undefined;
   let localImageOutputBytes: number | undefined;
@@ -778,23 +966,43 @@ Write one or two short paragraphs that explain what students are doing in this s
   let localImageOutputMimeType: string | undefined;
   let localImageOutputBuffer: Buffer | undefined;
   let localImageOutputFileName: string | undefined;
-  let imageSource: TodaySectionAssets["imageSource"] = "none";
-  if (localImagePath) {
-    const converted = await imageFileToDataUrl(localImagePath);
-    imageUrl = converted.dataUrl;
-    localImageOriginalBytes = converted.originalByteLength;
-    localImageOutputBytes = converted.outputByteLength;
-    localImageOptimized = converted.optimized;
-    localImageOutputMimeType = converted.outputMimeType;
-    localImageOutputBuffer = converted.outputBuffer;
-    const baseName = path.basename(localImagePath, path.extname(localImagePath));
-    const ext = extensionForMimeType(converted.outputMimeType) || path.extname(localImagePath);
-    localImageOutputFileName = `${toFilesystemSegment(baseName)}${ext}`;
-    imageSource = "local-file";
-  } else if (input.imageUrl && normalizeSingleLineInput(input.imageUrl)) {
-    imageSource = "cli-url";
-  } else if (imageUrl) {
-    imageSource = "file-url";
+  if (input.imageId !== undefined) {
+    if (!input.client) {
+      throw new Error("Canvas client is required to resolve --image-id.");
+    }
+    const canvasFile = await input.client.getFile(input.imageId);
+    if (!canvasFile.url) {
+      throw new Error(`Canvas file ${input.imageId} has no embeddable URL.`);
+    }
+    imageUrl = canvasFile.url;
+    canvasImageId = canvasFile.id;
+    canvasImageDisplayName = canvasFile.display_name ?? canvasFile.filename;
+    imageSource = "canvas-file-id";
+  } else {
+    imageUrl = normalizeSingleLineInput(input.imageUrl);
+    if (!imageUrl) {
+      imageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
+    } else {
+      await fs.writeFile(imageUrlPath, `${imageUrl}\n`, "utf8");
+    }
+
+    if (localImagePath) {
+      const converted = await imageFileToDataUrl(localImagePath);
+      imageUrl = converted.dataUrl;
+      localImageOriginalBytes = converted.originalByteLength;
+      localImageOutputBytes = converted.outputByteLength;
+      localImageOptimized = converted.optimized;
+      localImageOutputMimeType = converted.outputMimeType;
+      localImageOutputBuffer = converted.outputBuffer;
+      const baseName = path.basename(localImagePath, path.extname(localImagePath));
+      const ext = extensionForMimeType(converted.outputMimeType) || path.extname(localImagePath);
+      localImageOutputFileName = `${toFilesystemSegment(baseName)}${ext}`;
+      imageSource = "local-file";
+    } else if (input.imageUrl && normalizeSingleLineInput(input.imageUrl)) {
+      imageSource = "cli-url";
+    } else if (imageUrl) {
+      imageSource = "file-url";
+    }
   }
 
   let aiImagePrompt = normalizeSingleLineInput(input.aiImagePrompt);
@@ -811,6 +1019,8 @@ Write one or two short paragraphs that explain what students are doing in this s
     aiImagePrompt,
     createdFiles,
     imageSource,
+    canvasImageId,
+    canvasImageDisplayName,
     localImagePath,
     localImageOriginalBytes,
     localImageOutputBytes,
@@ -831,7 +1041,7 @@ function normalizeLooseKey(input: string): string {
 async function resolveTaskFolderName(
   assetsRoot: string,
   sessionName: string,
-  taskLetter: "A" | "B",
+  taskLetter: "A" | "B" | "C",
   defaultFolderName: string,
   explicitFolderName?: string
 ): Promise<string> {
@@ -911,11 +1121,13 @@ async function walkTaskAAssets(
 
 function parseTaskAAuthoredNotes(notesText: string): TaskAParsedNotes {
   let working = notesText.replace(/\r\n/g, "\n");
+  const frontmatter = parseTaskAFrontmatter(working);
+  working = frontmatter.body;
   const styles = parseTaskAStylesSection(working);
   const mediaUrls = parseTaskAMediaUrlsFromText(working);
 
-  const pageHeadingMatch = working.match(/^\s*(?:\*\*|#{1,6})\s*page title\s*$/im);
-  let pageTitle: string | undefined;
+  let pageTitle = normalizeTaskInlineInput(frontmatter.pageTitle);
+  const pageHeadingMatch = pageTitle ? null : working.match(/^\s*(?:\*\*|#{1,6})\s*page title\s*$/im);
   if (pageHeadingMatch) {
     const headingIndex = pageHeadingMatch.index ?? 0;
     const before = working.slice(0, headingIndex);
@@ -958,9 +1170,78 @@ function parseTaskAAuthoredNotes(notesText: string): TaskAParsedNotes {
     pageTitle: normalizeTaskInlineInput(pageTitle),
     authoredBodyText: normalizeTaskBlockText(working),
     iframeTemplate,
+    youtubeEmbedWidth: frontmatter.youtubeEmbedWidth,
     styles,
     mediaUrls
   };
+}
+
+function parseTaskAFrontmatter(raw: string): {
+  body: string;
+  pageTitle?: string;
+  youtubeEmbedWidth?: number;
+} {
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const match = normalized.match(/^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
+  if (!match) {
+    return { body: normalized };
+  }
+
+  const frontmatterText = match[1];
+  const body = normalized.slice(match[0].length).replace(/^\n+/, "");
+  let pageTitle: string | undefined;
+  let youtubeEmbedWidth: number | undefined;
+  let inMedia = false;
+  let inYoutube = false;
+
+  for (const rawLine of frontmatterText.split("\n")) {
+    const indent = rawLine.match(/^\s*/)?.[0].length ?? 0;
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const keyValueMatch = line.match(/^([A-Za-z0-9_]+):(?:\s*(.*))?$/);
+    if (!keyValueMatch) continue;
+
+    const key = keyValueMatch[1];
+    const value = stripMatchingQuotes((keyValueMatch[2] ?? "").trim());
+
+    if (indent === 0) {
+      inMedia = key === "media";
+      inYoutube = false;
+      if (key === "pageTitle" && value) {
+        pageTitle = value;
+      }
+      continue;
+    }
+
+    if (indent === 2 && inMedia) {
+      inYoutube = key === "youtube";
+      continue;
+    }
+
+    if (indent === 4 && inMedia && inYoutube && key === "width") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        youtubeEmbedWidth = Math.round(parsed);
+      }
+    }
+  }
+
+  return {
+    body,
+    pageTitle,
+    youtubeEmbedWidth
+  };
+}
+
+function stripMatchingQuotes(input: string): string {
+  if (
+    (input.startsWith('"') && input.endsWith('"')) ||
+    (input.startsWith("'") && input.endsWith("'"))
+  ) {
+    return input.slice(1, -1).trim();
+  }
+  return input;
 }
 
 function parseTaskAStylesSection(raw: string | undefined): TaskACalloutStyles | undefined {
@@ -1119,6 +1400,35 @@ function renderYoutubeIframe(url: string, iframeTemplate?: string): string {
   return `<iframe width="560" height="315" src="${embedUrl}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
 }
 
+function renderResponsiveYoutubeIframe(
+  url: string,
+  options: { iframeTemplate?: string; width?: number }
+): string {
+  if (options.iframeTemplate) {
+    return renderYoutubeIframe(url, options.iframeTemplate);
+  }
+
+  const embedUrl = toYouTubeEmbedUrl(url) ?? url;
+  const width = Number.isFinite(options.width) && (options.width ?? 0) > 0 ? Math.round(options.width as number) : 560;
+  const height = Math.round(width * 315 / 560);
+  return `<iframe width="${width}" height="${height}" src="${embedUrl}" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>`;
+}
+
+function isDirectVideoUrl(url: string): boolean {
+  return /\.(mp4|webm|ogg|m4v|mov)(\?.*)?$/i.test(url);
+}
+
+function toVimeoEmbedUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.toLowerCase().includes("vimeo.com")) return undefined;
+    const id = parsed.pathname.split("/").filter(Boolean)[0];
+    return id ? `https://player.vimeo.com/video/${id}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function stripCalloutPrefix(content: string, tone: string): string {
   return content.replace(new RegExp(`^\\s*${tone}\\s*:\\s*`, "i"), "").trim();
 }
@@ -1159,12 +1469,13 @@ function buildTaskMarkdownFromNotes(input: {
   notesBody: string;
   mediaLookup: Map<string, string>;
   iframeTemplate?: string;
+  youtubeEmbedWidth?: number;
 }): string {
   let output = input.notesBody;
 
   output = output
     .replace(/^\s*\*{3,}\s*(.+?)\s*$/gm, "### $1")
-    .replace(/^\s*###\s*(.+?)\s*$/gm, "### $1");
+    .replace(/^\s*###(?!#)\s*(.+?)\s*$/gm, "### $1");
 
   output = output.replace(
     /\[(NOTE|INFO|WARNING|SUCCESS|QUESTION)\]([\s\S]*?)\[\/\1\]/gi,
@@ -1187,7 +1498,10 @@ function buildTaskMarkdownFromNotes(input: {
   output = output.replace(/\[YOUTUBE_LINK\]([\s\S]*?)\[\/YOUTUBE_LINK\]/gi, (_, rawUrl: string) => {
     const url = rawUrl.trim();
     if (!url) return "";
-    return `\n\n<p>${renderYoutubeIframe(url, input.iframeTemplate)}</p>\n\n`;
+    return `\n\n<p>${renderResponsiveYoutubeIframe(url, {
+      iframeTemplate: input.iframeTemplate,
+      width: input.youtubeEmbedWidth
+    })}</p>\n\n`;
   });
 
   output = output.replace(/\[TABLE\]([\s\S]*?)\[\/TABLE\]/gi, (_, table: string) => {
@@ -1197,10 +1511,61 @@ function buildTaskMarkdownFromNotes(input: {
   output = output.replace(/\[HR\]/gi, "\n\n<hr />\n\n");
 
   output = output.replace(/\[AGENT\][\s\S]*?\[\/AGENT\]/gi, "");
+  output = replaceStandaloneMarkdownMedia(output, input);
+  output = replaceMarkdownImageReferences(output, input.mediaLookup);
   output = applyInlineProcessorTags(output);
   output = ensureMarkdownListSpacing(output);
   output = output.replace(/\n{3,}/g, "\n\n").trim();
   return output;
+}
+
+function replaceStandaloneMarkdownMedia(
+  input: string,
+  options: { iframeTemplate?: string; youtubeEmbedWidth?: number }
+): string {
+  return input
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!/^https?:\/\/\S+$/i.test(trimmed)) return line;
+
+      const youtubeEmbed = toYouTubeEmbedUrl(trimmed);
+      if (youtubeEmbed) {
+        return renderResponsiveYoutubeIframe(trimmed, {
+          iframeTemplate: options.iframeTemplate,
+          width: options.youtubeEmbedWidth
+        });
+      }
+
+      const vimeoEmbed = toVimeoEmbedUrl(trimmed);
+      if (vimeoEmbed) {
+        return `<iframe width="560" height="315" src="${vimeoEmbed}" title="Video embed" frameborder="0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>`;
+      }
+
+      if (isDirectVideoUrl(trimmed)) {
+        return `<video controls preload="metadata" src="${trimmed}"></video>`;
+      }
+
+      return line;
+    })
+    .join("\n");
+}
+
+function replaceMarkdownImageReferences(input: string, mediaLookup: Map<string, string>): string {
+  return input.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, altText: string, rawTarget: string) => {
+    const target = rawTarget.trim().replace(/^<|>$/g, "");
+    if (!target) return `![${altText}](${target})`;
+    if (/^(?:https?:|data:)/i.test(target)) {
+      return `![${altText}](${target})`;
+    }
+
+    const resolved = resolveTaskAImageUrl(target, mediaLookup);
+    if (!resolved) {
+      return `\n\n*Missing image asset: ${target}*\n\n`;
+    }
+
+    return `![${altText}](${resolved})`;
+  });
 }
 
 function renderHtmlTableFromMarkdownLikeBlock(raw: string): string {
@@ -1311,7 +1676,6 @@ async function prepareTaskAAssets(input: {
   assetsRoot: string;
   sessionName: string;
   taskFolderName: string;
-  taskTitle?: string;
   notesText?: string;
   notesFilePath?: string;
 }): Promise<TaskAAssets> {
@@ -1327,20 +1691,23 @@ async function prepareTaskAAssets(input: {
   await fs.mkdir(imagesFolderPath, { recursive: true });
 
   const createdFiles: string[] = [];
-  const notesTemplate = `** Page Title
-${NOTE_PLACEHOLDER_TOKEN}
+  const notesTemplate = `---
+pageTitle: ${NOTE_PLACEHOLDER_TOKEN}
+media:
+  youtube:
+    width: 560
+---
 
-Write student-facing content directly in this file.
+Write student-facing content directly in this file using Markdown.
 
-Processor tags:
-[IMAGE]image-file-name.jpg[/IMAGE]
-[YOUTUBE_LINK]https://youtu.be/your-video-id[/YOUTUBE_LINK]
-[NOTE]Note text[/NOTE]
-[INFO]Info text[/INFO]
-[WARNING]Warning text[/WARNING]
-[SUCCESS]Success text[/SUCCESS]
-[QUESTION]Question text[/QUESTION]
-[AGENT]Optional processor instruction (not rendered)[/AGENT]
+Examples:
+![Alt text](images/example.jpg)
+
+:::note
+Note text
+:::
+
+https://youtu.be/your-video-id
 `;
   if (await ensureFileWithTemplate(notesPath, notesTemplate)) createdFiles.push(notesPath);
 
@@ -1356,17 +1723,17 @@ Processor tags:
   }
 
   const parsed = notesText ? parseTaskAAuthoredNotes(notesText) : { mediaUrls: [] };
-  const taskTitle = normalizeTaskInlineInput(input.taskTitle) ?? parsed.pageTitle;
   const philosophyText = parsed.philosophy ?? TASK_A_DEFAULT_PHILOSOPHY_TEXT;
   const localMedia = await collectTaskALocalMedia(folderPath);
 
   return {
     folderPath,
     createdFiles,
-    taskTitle,
+    pageTitle: parsed.pageTitle,
     notesText,
     authoredBodyText: parsed.authoredBodyText,
     iframeTemplate: parsed.iframeTemplate,
+    youtubeEmbedWidth: parsed.youtubeEmbedWidth,
     philosophyText,
     calloutStyles: parsed.styles,
     mediaUrls: parsed.mediaUrls,
@@ -1379,6 +1746,7 @@ program.command("create")
   .option("--course-id <id>", "Canvas course id to upload to", String(env.canvasTestCourseId))
   .option("--from-file <path>", "Load Nexgen quiz JSON from file")
   .option("--prompt <text>", "Generate quiz from agent using a prompt")
+  .option("--difficulty <level>", "Difficulty for agent-generated quiz: easy, medium, hard, or mixed")
   .option("--dry-run", "Validate and show a summary without uploading", false)
   .action(async (opts) => {
     const courseId = Number(opts.courseId);
@@ -1389,6 +1757,13 @@ program.command("create")
     if (opts.fromFile && opts.prompt) {
       throw new Error("Provide only one of --from-file or --prompt.");
     }
+    if (opts.fromFile && opts.difficulty) {
+      throw new Error("--difficulty can only be used with --prompt.");
+    }
+
+    const difficulty = opts.difficulty
+      ? parseQuizDifficulty(String(opts.difficulty), "--difficulty")
+      : undefined;
 
     let raw: unknown;
 
@@ -1396,7 +1771,7 @@ program.command("create")
       const txt = await fs.readFile(String(opts.fromFile), "utf8");
       raw = JSON.parse(txt);
     } else {
-      raw = await generateQuizFromAgent(String(opts.prompt));
+      raw = await generateQuizFromAgent(String(opts.prompt), { difficulty });
     }
 
     const quiz = validateNexgenQuiz(raw);
@@ -1405,6 +1780,9 @@ program.command("create")
     console.log(`Quiz: ${quiz.title}`);
     console.log(`Questions: ${quiz.questions.length} (expected 5)`);
     console.log(`Target course: ${courseId}`);
+    if (difficulty) {
+      console.log(`Requested difficulty: ${difficulty}`);
+    }
     if (opts.dryRun) {
       console.log("Dry run: no upload performed.");
       return;
@@ -1430,6 +1808,54 @@ program.command("create")
     const urlGuess = created.html_url ?? `${env.canvasBaseUrl}/courses/${courseId}/quizzes/${created.id}`;
     console.log(`Created quiz id: ${created.id}`);
     console.log(`Quiz URL: ${urlGuess}`);
+  });
+
+program.command("course-files-scaffold")
+  .description("Create a folder scaffold in Canvas Files for a course.")
+  .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
+  .option("--from-file <path>", "Optional JSON file describing the folder tree")
+  .option("--dry-run", "Show which Canvas folders would be created", false)
+  .action(async (opts) => {
+    const courseId = Number(opts.courseId);
+    if (!Number.isFinite(courseId)) {
+      throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+    }
+
+    let folders: CanvasFolderNode[];
+    if (opts.fromFile) {
+      const text = await fs.readFile(String(opts.fromFile), "utf8");
+      folders = parseCanvasFolderStructureInput(JSON.parse(text));
+    } else {
+      folders = buildDefaultCanvasCourseFilesStructure();
+    }
+
+    const client = new CanvasClient();
+    const result = await ensureCanvasFolderTree({
+      client,
+      courseId,
+      folders,
+      dryRun: Boolean(opts.dryRun)
+    });
+
+    console.log(`Course: ${courseId}`);
+    console.log(`Source: ${opts.fromFile ? `JSON file ${String(opts.fromFile)}` : "built-in default scaffold"}`);
+    console.log(`Folders already present: ${result.existingPaths.length}`);
+    for (const folderPath of result.existingPaths) {
+      console.log(`= ${folderPath}`);
+    }
+    if (opts.dryRun) {
+      console.log(`Folders to create: ${result.createdPaths.length}`);
+      for (const folderPath of result.createdPaths) {
+        console.log(`+ ${folderPath}`);
+      }
+      console.log("Dry run: no Canvas folders created.");
+      return;
+    }
+
+    console.log(`Folders created: ${result.createdPaths.length}`);
+    for (const folderPath of result.createdPaths) {
+      console.log(`+ ${folderPath}`);
+    }
   });
 
 program.command("session-headers")
@@ -1715,7 +2141,6 @@ program.command("task-a-section")
   .description("Generate or update the session page for Task A using local session-assets content.")
   .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
   .option("--task-folder <name>", "Task A folder name under session-assets/<session-name>")
-  .option("--task-title <title>", "Task A title override (default: notes.md Page Title section or session topic)")
   .option("--page-title <title>", "Canvas page title override (default: notes.md Page Title)")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
   .option("--notes <text>", "Optional Task A notes markdown override (saved to notes.md)")
@@ -1753,18 +2178,14 @@ program.command("task-a-section")
       assetsRoot,
       sessionName,
       taskFolderName,
-      taskTitle: opts.taskTitle ? String(opts.taskTitle) : undefined,
       notesText: opts.notes ? String(opts.notes) : undefined,
       notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
     });
 
-    const taskTitle =
-      normalizeTaskInlineInput(opts.taskTitle ? String(opts.taskTitle) : undefined) ??
-      assets.taskTitle ??
-      `${sessionMeta.topic} - Task A`;
     const pageTitle = opts.pageTitle
       ? String(opts.pageTitle)
-      : taskTitle;
+      : assets.pageTitle ?? `${sessionMeta.topic} - Task A`;
+    const taskTitle = pageTitle;
 
     const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
     const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
@@ -1773,10 +2194,10 @@ program.command("task-a-section")
     if (!opts.dryRun && assets.localMedia.length > 0) {
       if (!sessionMeta.sessionNumberPadded) {
         throw new Error(
-          `Cannot map session name "${sessionName}" to a Session NN files folder for media upload.`
+          `Cannot map session name "${sessionName}" to a Session_NN/task_a files folder for media upload.`
         );
       }
-      const sessionFolderPath = `${SESSION_HEADER_PREFIX}${sessionMeta.sessionNumberPadded}`;
+      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_a");
       uploadedLocalMediaFolderPath = sessionFolderPath;
       for (const local of assets.localMedia) {
         const fileData = Buffer.from(await fs.readFile(local.absolutePath));
@@ -1816,7 +2237,8 @@ program.command("task-a-section")
     const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
       notesBody,
       mediaLookup,
-      iframeTemplate: assets.iframeTemplate
+      iframeTemplate: assets.iframeTemplate,
+      youtubeEmbedWidth: assets.youtubeEmbedWidth
     });
     const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
 
@@ -1836,7 +2258,6 @@ program.command("task-a-section")
     console.log(`Task A header: ${built.taskHeaderTitle}`);
     console.log(`Task folder: ${taskFolderName}`);
     console.log(`Assets folder: ${assets.folderPath}`);
-    console.log(`Task title: ${taskTitle}`);
     console.log(`Page title: ${pageTitle}`);
     console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
     if (assets.createdFiles.length > 0) {
@@ -1845,7 +2266,7 @@ program.command("task-a-section")
         console.log(`- ${createdPath}`);
       }
     }
-    console.log("Task body source: notes.md processor mode");
+    console.log("Task body source: notes.md markdown/legacy compatible mode");
     console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
     console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
     console.log(`Media URLs: ${assets.mediaUrls.length}`);
@@ -1864,7 +2285,7 @@ program.command("task-a-section")
     }
 
     if (uploadedLocalMedia.length > 0) {
-      const sessionFolderPath = uploadedLocalMediaFolderPath ?? `${SESSION_HEADER_PREFIX}[unknown]`;
+      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_a";
       console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
       for (const uploaded of uploadedLocalMedia) {
         console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
@@ -1940,7 +2361,6 @@ program.command("task-b-section")
   .description("Generate or update the session page for Task B using local session-assets content.")
   .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
   .option("--task-folder <name>", "Task B folder name under session-assets/<session-name>")
-  .option("--task-title <title>", "Task B title override (default: notes.md Page Title section or session topic)")
   .option("--page-title <title>", "Canvas page title override (default: notes.md Page Title)")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
   .option("--notes <text>", "Optional Task B notes markdown override (saved to notes.md)")
@@ -1978,18 +2398,14 @@ program.command("task-b-section")
       assetsRoot,
       sessionName,
       taskFolderName,
-      taskTitle: opts.taskTitle ? String(opts.taskTitle) : undefined,
       notesText: opts.notes ? String(opts.notes) : undefined,
       notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
     });
 
-    const taskTitle =
-      normalizeTaskInlineInput(opts.taskTitle ? String(opts.taskTitle) : undefined) ??
-      assets.taskTitle ??
-      `${sessionMeta.topic} - Task B`;
     const pageTitle = opts.pageTitle
       ? String(opts.pageTitle)
-      : taskTitle;
+      : assets.pageTitle ?? `${sessionMeta.topic} - Task B`;
+    const taskTitle = pageTitle;
 
     const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
     const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
@@ -1998,10 +2414,10 @@ program.command("task-b-section")
     if (!opts.dryRun && assets.localMedia.length > 0) {
       if (!sessionMeta.sessionNumberPadded) {
         throw new Error(
-          `Cannot map session name "${sessionName}" to a Session NN files folder for media upload.`
+          `Cannot map session name "${sessionName}" to a Session_NN/task_b files folder for media upload.`
         );
       }
-      const sessionFolderPath = `${SESSION_HEADER_PREFIX}${sessionMeta.sessionNumberPadded}`;
+      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_b");
       uploadedLocalMediaFolderPath = sessionFolderPath;
       for (const local of assets.localMedia) {
         const fileData = Buffer.from(await fs.readFile(local.absolutePath));
@@ -2041,7 +2457,8 @@ program.command("task-b-section")
     const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
       notesBody,
       mediaLookup,
-      iframeTemplate: assets.iframeTemplate
+      iframeTemplate: assets.iframeTemplate,
+      youtubeEmbedWidth: assets.youtubeEmbedWidth
     });
     const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
 
@@ -2061,7 +2478,6 @@ program.command("task-b-section")
     console.log(`Task B header: ${built.taskHeaderTitle}`);
     console.log(`Task folder: ${taskFolderName}`);
     console.log(`Assets folder: ${assets.folderPath}`);
-    console.log(`Task title: ${taskTitle}`);
     console.log(`Page title: ${pageTitle}`);
     console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
     if (assets.createdFiles.length > 0) {
@@ -2070,7 +2486,7 @@ program.command("task-b-section")
         console.log(`- ${createdPath}`);
       }
     }
-    console.log("Task body source: notes.md processor mode");
+    console.log("Task body source: notes.md markdown/legacy compatible mode");
     console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
     console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
     console.log(`Media URLs: ${assets.mediaUrls.length}`);
@@ -2089,7 +2505,227 @@ program.command("task-b-section")
     }
 
     if (uploadedLocalMedia.length > 0) {
-      const sessionFolderPath = uploadedLocalMediaFolderPath ?? `${SESSION_HEADER_PREFIX}[unknown]`;
+      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_b";
+      console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
+      for (const uploaded of uploadedLocalMedia) {
+        console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
+      }
+    }
+
+    const normalize = (v: string): string => v.trim().toLowerCase();
+    const existingModulePage = built.moduleItems.find(
+      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
+    );
+
+    let pageUrl: string;
+    let createdPage = false;
+    let createdModuleItem = false;
+    let movedModuleItem = false;
+
+    if (existingModulePage?.page_url) {
+      pageUrl = existingModulePage.page_url;
+      await client.updatePage(courseId, pageUrl, {
+        title: pageTitle,
+        body: built.sectionHtml,
+        published: shouldPublish
+      });
+    } else {
+      const pages = await client.listPages(courseId, pageTitle);
+      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
+      if (existingPage) {
+        pageUrl = existingPage.url;
+        await client.updatePage(courseId, pageUrl, {
+          title: pageTitle,
+          body: built.sectionHtml,
+          published: shouldPublish
+        });
+      } else {
+        const created = await client.createPage(courseId, {
+          title: pageTitle,
+          body: built.sectionHtml,
+          published: shouldPublish
+        });
+        pageUrl = created.url;
+        createdPage = true;
+      }
+    }
+
+    const moduleItemForPage = built.moduleItems.find(
+      (item) => item.type === "Page" && item.page_url === pageUrl
+    );
+    if (!moduleItemForPage) {
+      await client.createModulePageItem(courseId, built.module.id, {
+        title: pageTitle,
+        pageUrl,
+        position: built.insertionPosition
+      });
+      createdModuleItem = true;
+    } else if (moduleItemForPage.position !== built.insertionPosition) {
+      await client.updateModuleItemPosition(
+        courseId,
+        built.module.id,
+        moduleItemForPage.id,
+        built.insertionPosition
+      );
+      movedModuleItem = true;
+    }
+
+    console.log(createdPage ? "Created page." : "Updated existing page.");
+    if (createdModuleItem) console.log("Added page to session module.");
+    if (movedModuleItem) console.log("Moved module item to target section.");
+    if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
+    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
+  });
+
+program.command("task-c-section")
+  .description("Generate or update the session page for Task C using local session-assets content.")
+  .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
+  .option("--task-folder <name>", "Task C folder name under session-assets/<session-name>")
+  .option("--page-title <title>", "Canvas page title override (default: notes.md Page Title)")
+  .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
+  .option("--notes <text>", "Optional Task C notes markdown override (saved to notes.md)")
+  .option("--notes-file <path>", "Optional Task C notes markdown file override (saved to notes.md)")
+  .option("--publish", "Publish page after create/update (default is unpublished)", false)
+  .option(
+    "--assets-root <path>",
+    "Local root for task assets",
+    path.resolve(process.cwd(), "apps", "cli", "session-assets")
+  )
+  .option("--dry-run", "Generate and preview without uploading", false)
+  .action(async (opts) => {
+    const courseId = Number(opts.courseId);
+    if (!Number.isFinite(courseId)) {
+      throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+    }
+
+    if (opts.notes && opts.notesFile) {
+      throw new Error("Use either --notes or --notes-file, not both.");
+    }
+
+    const sessionName = String(opts.sessionName);
+    const sessionMeta = parseSessionMetadata(sessionName);
+    const shouldPublish = Boolean(opts.publish);
+    const assetsRoot = path.resolve(String(opts.assetsRoot));
+    const taskFolderName = await resolveTaskFolderName(
+      assetsRoot,
+      sessionName,
+      "C",
+      TASK_C_DEFAULT_FOLDER_NAME,
+      opts.taskFolder ? String(opts.taskFolder) : undefined
+    );
+
+    const assets = await prepareTaskAAssets({
+      assetsRoot,
+      sessionName,
+      taskFolderName,
+      notesText: opts.notes ? String(opts.notes) : undefined,
+      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
+    });
+
+    const pageTitle = opts.pageTitle
+      ? String(opts.pageTitle)
+      : assets.pageTitle ?? `${sessionMeta.topic} - Task C`;
+    const taskTitle = pageTitle;
+
+    const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
+    const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
+    let uploadedLocalMediaFolderPath: string | undefined;
+
+    if (!opts.dryRun && assets.localMedia.length > 0) {
+      if (!sessionMeta.sessionNumberPadded) {
+        throw new Error(
+          `Cannot map session name "${sessionName}" to a Session_NN/task_c files folder for media upload.`
+        );
+      }
+      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_c");
+      uploadedLocalMediaFolderPath = sessionFolderPath;
+      for (const local of assets.localMedia) {
+        const fileData = Buffer.from(await fs.readFile(local.absolutePath));
+        const uploaded = await uploadFileToCanvasSessionFolder({
+          courseId,
+          sessionFolderPath,
+          fileName: local.fileName,
+          contentType: local.contentType,
+          data: fileData
+        });
+        mediaAssets.push({
+          url: uploaded.url,
+          kind: local.kind,
+          label: local.relativePath
+        });
+        uploadedLocalMedia.push({
+          source: local.relativePath,
+          uploadedUrl: uploaded.url,
+          id: uploaded.id
+        });
+      }
+    } else {
+      for (const local of assets.localMedia) {
+        mediaAssets.push({
+          url: local.relativePath,
+          kind: local.kind,
+          label: local.relativePath
+        });
+      }
+    }
+
+    const notesBody = normalizeTaskBlockText(assets.authoredBodyText ?? assets.notesText);
+    if (!notesBody) {
+      throw new Error("Task C notes.md is empty. Add student-facing content and processor tags, then retry.");
+    }
+    const mediaLookup = buildTaskAMediaLookup(mediaAssets);
+    const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
+      notesBody,
+      mediaLookup,
+      iframeTemplate: assets.iframeTemplate,
+      youtubeEmbedWidth: assets.youtubeEmbedWidth
+    });
+    const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
+
+    const client = new CanvasClient();
+    const built = await buildTaskCSection(client, courseId, sessionName, {
+      pageTitle,
+      taskTitle,
+      bodyMarkdown: finalTaskBodyMarkdown,
+      suppressTaskTitleHeading: true,
+      disableAutoMediaSection: true,
+      calloutStyles: finalCalloutStyles,
+      mediaAssets
+    });
+
+    console.log(`Course: ${courseId}`);
+    console.log(`Session module: ${built.module.name} (${built.module.id})`);
+    console.log(`Task C header: ${built.taskHeaderTitle}`);
+    console.log(`Task folder: ${taskFolderName}`);
+    console.log(`Assets folder: ${assets.folderPath}`);
+    console.log(`Page title: ${pageTitle}`);
+    console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
+    if (assets.createdFiles.length > 0) {
+      console.log("Created local asset templates:");
+      for (const createdPath of assets.createdFiles) {
+        console.log(`- ${createdPath}`);
+      }
+    }
+    console.log("Task body source: notes.md markdown/legacy compatible mode");
+    console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
+    console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
+    console.log(`Media URLs: ${assets.mediaUrls.length}`);
+    console.log(`Local media files: ${assets.localMedia.length}`);
+    console.log(`Media references resolved: ${mediaLookup.size}`);
+    console.log(`Target module position: ${built.insertionPosition}`);
+
+    if (opts.dryRun) {
+      if (assets.localMedia.length > 0) {
+        console.log("Dry run: local media files are not uploaded.");
+      }
+      console.log("Dry run: no Canvas updates performed.");
+      console.log("Generated HTML preview:");
+      console.log(built.sectionHtml.split("\n").slice(0, 60).join("\n"));
+      return;
+    }
+
+    if (uploadedLocalMedia.length > 0) {
+      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_c";
       console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
       for (const uploaded of uploadedLocalMedia) {
         console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
@@ -2169,6 +2805,7 @@ program.command("today-section")
   .option("--notes <text>", "Optional raw notes text (rewritten by agent)")
   .option("--notes-file <path>", "Optional path to raw notes text/markdown (rewritten by agent)")
   .option("--image-url <url>", "Optional image URL to embed in the section")
+  .option("--image-id <id>", "Optional existing Canvas file id to embed in the section")
   .option("--ai-image-prompt <text>", "Optional AI image prompt/brief to include and save locally")
   .option("--publish", "Publish page after create/update (default is unpublished)", false)
   .option(
@@ -2186,6 +2823,9 @@ program.command("today-section")
     if (opts.notes && opts.notesFile) {
       throw new Error("Use either --notes or --notes-file, not both.");
     }
+    if (opts.imageUrl && opts.imageId) {
+      throw new Error("Use either --image-url or --image-id, not both.");
+    }
 
     const sessionName = String(opts.sessionName);
     const sessionMeta = parseSessionMetadata(sessionName);
@@ -2194,6 +2834,8 @@ program.command("today-section")
       : buildIntroductionPageTitle(sessionName);
     const shouldPublish = Boolean(opts.publish);
     const assetsRoot = path.resolve(String(opts.assetsRoot));
+    const imageId = opts.imageId ? parsePositiveInteger(String(opts.imageId), "--image-id") : undefined;
+    const client = new CanvasClient();
 
     const assets = await prepareTodaySectionAssets({
       assetsRoot,
@@ -2202,10 +2844,10 @@ program.command("today-section")
       notesText: opts.notes ? String(opts.notes) : undefined,
       notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined,
       imageUrl: opts.imageUrl ? String(opts.imageUrl) : undefined,
-      aiImagePrompt: opts.aiImagePrompt ? String(opts.aiImagePrompt) : undefined
+      imageId,
+      aiImagePrompt: opts.aiImagePrompt ? String(opts.aiImagePrompt) : undefined,
+      client
     });
-
-    const client = new CanvasClient();
     const seedBuilt = await buildWhatAreWeDoingTodaySection(client, courseId, sessionName, {
       sectionTitle: pageTitle,
       notesText: undefined,
@@ -2262,6 +2904,11 @@ program.command("today-section")
         `${before && after ? ` (${before} -> ${after})` : ""}` +
         `${assets.localImageOutputMimeType ? ` [${assets.localImageOutputMimeType}]` : ""}`
       );
+    } else if (assets.imageSource === "canvas-file-id") {
+      console.log(
+        `Image mode: Canvas file id ${assets.canvasImageId}` +
+        `${assets.canvasImageDisplayName ? ` (${assets.canvasImageDisplayName})` : ""}`
+      );
     } else if (assets.imageSource === "cli-url") {
       console.log("Image mode: --image-url input");
     } else if (assets.imageSource === "file-url") {
@@ -2286,10 +2933,10 @@ program.command("today-section")
     if (assets.imageSource === "local-file" && assets.localImageOutputBuffer && assets.localImageOutputMimeType) {
       if (!sessionMeta.sessionNumberPadded) {
         throw new Error(
-          `Cannot map session name "${sessionName}" to a Session NN files folder for image upload.`
+          `Cannot map session name "${sessionName}" to a Session_NN/what_are_we_doing_today files folder for image upload.`
         );
       }
-      const sessionFolderPath = `${SESSION_HEADER_PREFIX}${sessionMeta.sessionNumberPadded}`;
+      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "what_are_we_doing_today");
       const uploadName =
         assets.localImageOutputFileName ??
         `intro-${sessionMeta.sessionNumberPadded}${extensionForMimeType(assets.localImageOutputMimeType)}`;

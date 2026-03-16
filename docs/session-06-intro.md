@@ -1,0 +1,1 @@
+In today's session, we will be assembling the physical pieces of our safe (not the wiring just yet). At the end, you should have a safe that looks a bit like this:

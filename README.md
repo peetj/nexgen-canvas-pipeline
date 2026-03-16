@@ -28,11 +28,14 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 ## Command Summary
 ### Main CLI (`apps/cli/src/cli.ts`)
 - `create`: Creates a Canvas Classic Quiz either from a Nexgen JSON file or generated agent content. It validates the quiz structure and uploads questions to the selected course.
+- `course-files-scaffold`: Creates a Canvas Files folder scaffold in a course. It supports a built-in default session structure or a custom JSON tree.
 - `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
 - `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
 - `teacher-notes`: Builds a canonical Teacher Notes page from existing session content. In live mode it updates module placement; in draft mode it prepares a safe draft page without changing live placement.
-- `task-a-section`: Builds/updates a Task A page from `session-assets/<session>/<task-folder>/notes.md` and local media, applying processor tags and placing it under the `Session NN: Task A` header.
-- `today-section`: Builds/updates the session introduction page for the `What we are doing Today` section. It rewrites notes via the intro agent, uploads local images to Canvas Files (`Session NN`), then applies final HTML.
+- `task-a-section`: Builds/updates a Task A page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task A` header and uploading local media to Canvas Files under `Session_NN/task_a`.
+- `task-b-section`: Builds/updates a Task B page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task B` header and uploading local media to Canvas Files under `Session_NN/task_b`.
+- `task-c-section`: Builds/updates a Task C page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task C` header and uploading local media to Canvas Files under `Session_NN/task_c`.
+- `today-section`: Builds/updates the session introduction page for the `What we are doing Today` section. It rewrites notes via the intro agent, uploads local images to Canvas Files under `Session_NN/what_are_we_doing_today`, then applies final HTML.
 
 ### Plugins Runner (`apps/plugins-runner/src/cli.ts`)
 - `list`: Shows available reusable Canvas workflow plugins that can be executed by the runner.
@@ -68,7 +71,7 @@ Use either invocation style:
 Run once before direct mode (or whenever `packages/canvas-sdk/src` changes):
 `npm run -w @nexgen/canvas-sdk build`
 2. npm script wrapper:
-`npm run dev -- <command> -- [options]`
+`npm run dev -- <command> [options]`
 
 ### Command: `create`
 Create a quiz in Canvas from a JSON file or from an agent prompt.
@@ -77,19 +80,53 @@ Options:
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--from-file <path>`: Path to Nexgen quiz JSON input.
 - `--prompt <text>`: Prompt used to generate quiz content via quiz agent.
+- `--difficulty <level>`: Optional agent difficulty preference. One of `easy`, `medium`, `hard`, `mixed`.
 - `--dry-run`: Validate/show summary only; no Canvas upload.
 
 Rules:
 - Provide exactly one of `--from-file` or `--prompt`.
+- `--difficulty` only applies with `--prompt`.
+- For file-based quizzes, set `settings.shuffleAnswers: true` in the JSON if you want the correct choice position randomized before upload.
+- Agent-generated quizzes now request shuffled answers by default.
 
 Examples:
 ```bash
 npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
 npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.example.json
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --course-id 12345 --dry-run
+npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --difficulty hard --course-id 12345 --dry-run
 
 # npm wrapper form
-npm run dev -- create -- --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
+npm run dev -- create --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
+```
+
+### Command: `course-files-scaffold`
+Create a folder scaffold in Canvas course `Files`.
+
+Options:
+- `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
+- `--from-file <path>`: Optional JSON file describing the folder tree. If omitted, the built-in default scaffold is used.
+- `--dry-run`: Preview which folders would be created without changing Canvas.
+
+Default scaffold:
+- Top level: `Session_00` to `Session_08`, plus `BONUS_Session_09` and `BONUS_Session_10`
+- Second level inside each top-level folder: `teacher_notes`, `what_are_we_doing_today`, `task_a`, `task_b`, `task_c`
+
+JSON format:
+- Either a root array of folders, or an object with a `folders` array.
+- Each folder can be a string name or an object with `name` and optional `children`.
+- Example file: `apps/cli/examples/course-files-scaffold.example.json`
+
+Examples:
+```bash
+# Preview the built-in default structure
+npx tsx apps/cli/src/cli.ts course-files-scaffold --course-id 21 --dry-run
+
+# Create the built-in default structure in Canvas Files
+npx tsx apps/cli/src/cli.ts course-files-scaffold --course-id 21
+
+# Create a custom structure from JSON
+npx tsx apps/cli/src/cli.ts course-files-scaffold --course-id 21 --from-file apps/cli/examples/course-files-scaffold.example.json
 ```
 
 ### Command: `session-headers`
@@ -106,7 +143,7 @@ Example:
 npx tsx apps/cli/src/cli.ts session-headers --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
 
 # npm wrapper form
-npm run dev -- session-headers -- --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
+npm run dev -- session-headers --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
 ```
 
 ### Command: `clone-survey`
@@ -173,7 +210,7 @@ npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session
 npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad"
 
 # npm wrapper form
-npm run dev -- teacher-notes -- --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
+npm run dev -- teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
 ```
 
 ### Command: `task-a-section`
@@ -182,8 +219,7 @@ Generate/update the `Task A` page from local session assets.
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
 - `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `Task A`.
-- `--task-title <title>`: Optional Task A title override (otherwise read from `notes.md` `** Page Title` section).
-- `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` page title.
+- `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` `pageTitle` frontmatter value.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
 - `--notes-file <path>`: Optional notes markdown file override (saved to `notes.md`).
@@ -195,11 +231,18 @@ Task A asset skeleton (auto-created if missing):
 - `notes.md` only (single source of truth)
 - `images/` folder (for local image/video assets)
 
-`notes.md` processor tags:
+`notes.md` authoring:
+- Preferred format is Markdown-first with `pageTitle` in frontmatter.
+- Legacy processor tags still work during migration.
+
+Legacy `notes.md` processor tags:
 - `[IMAGE]file-name.jpg[/IMAGE]`
 - `[YOUTUBE_LINK]https://youtu.be/...[/YOUTUBE_LINK]`
 - `[NOTE]...[/NOTE]`, `[INFO]...[/INFO]`, `[WARNING]...[/WARNING]`, `[SUCCESS]...[/SUCCESS]`, `[QUESTION]...[/QUESTION]`
 - `[AGENT]...[/AGENT]` (processor instruction only, not rendered)
+
+Markdown-first reference example:
+- See `docs/task-a-canonical-markdown-example.md` for a proposed canonical format based on `Session 05 - Soldering / TaskA / notes.md`.
 
 Formatting behavior:
 - `*** Heading` lines are converted to `<h3>`.
@@ -210,7 +253,7 @@ Use quotes around these values in `.env` so `#` color values parse correctly.
 
 Local media behavior:
 - Image/video files placed anywhere inside the Task A folder (including `images/`) are auto-detected.
-- In non-dry-run mode they are uploaded to Canvas Files folder `Session NN` and embedded in the page.
+- In non-dry-run mode they are uploaded to Canvas Files folder `Session_NN/task_a` and embedded in the page.
 - In dry-run mode they are discovered but not uploaded.
 
 Examples:
@@ -225,6 +268,52 @@ npx tsx apps/cli/src/cli.ts task-a-section --course-id 21 --session-name "Sessio
 npx tsx apps/cli/src/cli.ts task-a-section --course-id 21 --session-name "Session 05 - Soldering" --notes-file docs/session-05-task-a.md
 ```
 
+### Command: `task-b-section`
+Generate/update the `Task B` page from local session assets.
+
+Options:
+- `--session-name <name>`: Required. Exact Canvas module name for the session.
+- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `TaskB`.
+- `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` `pageTitle` frontmatter value.
+- `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
+- `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
+- `--notes-file <path>`: Optional notes markdown file override (saved to `notes.md`).
+- `--publish`: Publish page after create/update. Default is unpublished.
+- `--assets-root <path>`: Optional local assets root. Default: `apps/cli/session-assets`.
+- `--dry-run`: Generate preview only; no Canvas updates or media uploads.
+
+Behavior notes:
+- Same Markdown-first / legacy-compatible authoring path as `task-a-section`.
+- Local media uploads target `Session_NN/task_b`.
+
+Example:
+```bash
+npm run dev -- task-b-section --course-id 21 --session-name "Session 06 - Assembling the Safe" --dry-run
+```
+
+### Command: `task-c-section`
+Generate/update the `Task C` page from local session assets.
+
+Options:
+- `--session-name <name>`: Required. Exact Canvas module name for the session.
+- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `TaskC`.
+- `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` `pageTitle` frontmatter value.
+- `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
+- `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
+- `--notes-file <path>`: Optional notes markdown file override (saved to `notes.md`).
+- `--publish`: Publish page after create/update. Default is unpublished.
+- `--assets-root <path>`: Optional local assets root. Default: `apps/cli/session-assets`.
+- `--dry-run`: Generate preview only; no Canvas updates or media uploads.
+
+Behavior notes:
+- Same Markdown-first / legacy-compatible authoring path as `task-a-section`.
+- Local media uploads target `Session_NN/task_c`.
+
+Example:
+```bash
+npm run dev -- task-c-section --course-id 21 --session-name "Session 06 - Assembling the Safe" --dry-run
+```
+
 ### Command: `today-section`
 Generate/update the intro page for the `What we are doing Today` section.
 
@@ -235,6 +324,7 @@ Options:
 - `--notes <text>`: Optional raw notes draft. This is rewritten by the intro agent.
 - `--notes-file <path>`: Optional raw notes file. This is rewritten by the intro agent.
 - `--image-url <url>`: Optional image URL to embed.
+- `--image-id <id>`: Optional existing Canvas file id to embed.
 - `--ai-image-prompt <text>`: Optional AI image brief text included in the page.
 - `--publish`: Optional. Publish page after update/create. Default is unpublished.
 - `--assets-root <path>`: Optional local assets root. Default: `apps/cli/session-assets`.
@@ -247,10 +337,11 @@ Notes:
   - `notes.md`
   - `image-url.txt`
   - `ai-image-prompt.txt`
+- `--image-id` uses an already-uploaded Canvas file directly and skips local image discovery/upload for that run.
 - You can also place a local image file directly in that same folder (`image.png`, `image.jpg`, etc.).
-- Local image file takes priority over `--image-url` and `image-url.txt`.
+- If `--image-id` is not used, local image file takes priority over `--image-url` and `image-url.txt`.
 - Oversized local image files are auto-optimized (resize/compress) to keep web payloads controlled (target <= `450 KB`).
-- On publish, local image files are uploaded to Canvas Files in `Session NN` first, then the page HTML is updated to use that uploaded file URL.
+- On publish, local image files are uploaded to Canvas Files in `Session_NN/what_are_we_doing_today` first, then the page HTML is updated to use that uploaded file URL.
 - Intro text is generated by the intro endpoint (`/today-intro`), not copied verbatim from notes.
 - Ensure the deployed canvas agent supports `POST /today-intro`.
 
@@ -261,6 +352,9 @@ npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session
 
 # Use raw notes and a direct image URL
 npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session 04 - Prototyping the Safe" --notes "In this session students wire and test the safe prototype before uploading code." --image-url "https://example.com/safe-prototype.jpg"
+
+# Use an existing Canvas file id instead of uploading a new image
+npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session 04 - Prototyping the Safe" --image-id 12345
 
 # Use notes from file + AI image brief
 npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session 04 - Prototyping the Safe" --notes-file docs/session-04-intro.md --ai-image-prompt "A bright STEM classroom scene with students prototyping an ESP32 safe"
@@ -289,8 +383,8 @@ npx tsx apps/plugins-runner/src/cli.ts run --plugin reveal-answer --arg "mode=bo
 Workspace script invocation:
 ```bash
 npm run plugins:dev -- list
-npm run plugins:dev -- run -- --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
-npm run plugins:dev -- run -- --plugin reveal-answer --arg "answer=Your answer text"
+npm run plugins:dev -- run --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
+npm run plugins:dev -- run --plugin reveal-answer --arg "answer=Your answer text"
 ```
 
 `reveal-answer` packaging notes:
