@@ -71,7 +71,7 @@ Use either invocation style:
 Run once before direct mode (or whenever `packages/canvas-sdk/src` changes):
 `npm run -w @nexgen/canvas-sdk build`
 2. npm script wrapper:
-`npm run dev -- <command> -- [options]`
+`npm run dev -- <command> [options]`
 
 ### Command: `create`
 Create a quiz in Canvas from a JSON file or from an agent prompt.
@@ -97,7 +97,7 @@ npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" 
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --difficulty hard --course-id 12345 --dry-run
 
 # npm wrapper form
-npm run dev -- create -- --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
+npm run dev -- create --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
 ```
 
 ### Command: `course-files-scaffold`
@@ -143,7 +143,7 @@ Example:
 npx tsx apps/cli/src/cli.ts session-headers --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
 
 # npm wrapper form
-npm run dev -- session-headers -- --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
+npm run dev -- session-headers --course-id 12345 --module-name "Term 1 - Module" --session 1 --dry-run
 ```
 
 ### Command: `clone-survey`
@@ -210,7 +210,7 @@ npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session
 npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad"
 
 # npm wrapper form
-npm run dev -- teacher-notes -- --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
+npm run dev -- teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
 ```
 
 ### Command: `task-a-section`
@@ -288,7 +288,7 @@ Behavior notes:
 
 Example:
 ```bash
-npm run dev -- task-b-section -- --course-id 21 --session-name "Session 06 - Assembling the Safe" --dry-run
+npm run dev -- task-b-section --course-id 21 --session-name "Session 06 - Assembling the Safe" --dry-run
 ```
 
 ### Command: `task-c-section`
@@ -311,7 +311,7 @@ Behavior notes:
 
 Example:
 ```bash
-npm run dev -- task-c-section -- --course-id 21 --session-name "Session 06 - Assembling the Safe" --dry-run
+npm run dev -- task-c-section --course-id 21 --session-name "Session 06 - Assembling the Safe" --dry-run
 ```
 
 ### Command: `today-section`
@@ -383,8 +383,8 @@ npx tsx apps/plugins-runner/src/cli.ts run --plugin reveal-answer --arg "mode=bo
 Workspace script invocation:
 ```bash
 npm run plugins:dev -- list
-npm run plugins:dev -- run -- --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
-npm run plugins:dev -- run -- --plugin reveal-answer --arg "answer=Your answer text"
+npm run plugins:dev -- run --plugin module-overview --course-id 21 --arg "moduleName=Session 03 - The LCD Screen & 3x4 Matrix Keypad"
+npm run plugins:dev -- run --plugin reveal-answer --arg "answer=Your answer text"
 ```
 
 `reveal-answer` packaging notes:
