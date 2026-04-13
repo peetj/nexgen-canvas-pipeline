@@ -13,6 +13,7 @@ type FormRequestOptions = {
 export type CanvasModuleSummary = {
   id: number;
   name: string;
+  position?: number;
 };
 
 export type CanvasModuleItem = {
@@ -220,6 +221,38 @@ export class CanvasClient {
     return this.request({
       method: "GET",
       path: `/api/v1/courses/${courseId}/modules?${params.toString()}`
+    });
+  }
+
+  async createModule(
+    courseId: number,
+    input: {
+      name: string;
+      position?: number;
+      unlockAt?: string;
+      requireSequentialProgress?: boolean;
+      publishFinalGrade?: boolean;
+    }
+  ): Promise<CanvasModuleSummary> {
+    const body = new URLSearchParams({
+      "module[name]": input.name
+    });
+    if (input.position !== undefined) {
+      body.set("module[position]", String(input.position));
+    }
+    if (input.unlockAt) {
+      body.set("module[unlock_at]", input.unlockAt);
+    }
+    if (input.requireSequentialProgress !== undefined) {
+      body.set("module[require_sequential_progress]", String(input.requireSequentialProgress));
+    }
+    if (input.publishFinalGrade !== undefined) {
+      body.set("module[publish_final_grade]", String(input.publishFinalGrade));
+    }
+    return this.requestForm({
+      method: "POST",
+      path: `/api/v1/courses/${courseId}/modules`,
+      body
     });
   }
 

@@ -36,6 +36,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 - `task-b-section`: Builds/updates a Task B page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task B` header and uploading local media to Canvas Files under `Session_NN/task_b`.
 - `task-c-section`: Builds/updates a Task C page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task C` header and uploading local media to Canvas Files under `Session_NN/task_c`.
 - `today-section`: Builds/updates the session introduction page for the `What we are doing Today` section. It rewrites notes via the intro agent, uploads local images to Canvas Files under `Session_NN/what_are_we_doing_today`, then applies final HTML.
+- `course-orchestrate`: Creates or updates multiple modules/pages from a JSON blueprint. It reuses existing section workflows such as `session-headers`, `today-section`, and task section generation instead of re-implementing them.
 
 ### Plugins Runner (`apps/plugins-runner/src/cli.ts`)
 - `list`: Shows available reusable Canvas workflow plugins that can be executed by the runner.
@@ -372,6 +373,34 @@ npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session
 
 # Publish live (otherwise defaults to unpublished)
 npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session 05 - Soldering" --publish
+```
+
+### Command: `course-orchestrate`
+Create or update multiple modules and pages from a JSON blueprint for an existing Canvas course.
+
+Options:
+- `--course-id <id>`: Required. Existing Canvas course id to target.
+- `--from-file <path>`: Required. Path to the orchestration JSON blueprint.
+- `--assets-root <path>`: Optional local root for section assets used by `today-section` and task section steps. Default: `apps/cli/session-assets`.
+- `--dry-run`: Plan orchestration without Canvas writes.
+
+Blueprint notes:
+- Blueprint schema version is `course-orchestrator.v1`.
+- Top-level shape is `{ "schemaVersion": "...", "modules": [...] }`.
+- Each module entry can create the module if missing, then run ordered workflow steps.
+- Supported step types in v1: `session-headers`, `today-section`, `task-a-section`, `task-b-section`, `task-c-section`, `subheader`, `page`.
+- `page` steps use a typed `content` array. Supported content block types: `markdown`, `markdownFile`, `html`, `htmlFile`, `imageFile`.
+- `today-section` and task section steps reuse the same logic as the standalone commands.
+- On a brand-new module, `--dry-run` can fully plan structural steps immediately. Module-aware content previews such as `today-section` may be skipped until the module exists or a live run creates it.
+- Example blueprint: `apps/cli/examples/course-orchestrator.example.json`
+
+Examples:
+```bash
+# Plan a multi-module orchestration run
+npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/examples/course-orchestrator.example.json --dry-run
+
+# Apply the blueprint to the target course
+npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/examples/course-orchestrator.example.json
 ```
 
 ### Plugins Runner

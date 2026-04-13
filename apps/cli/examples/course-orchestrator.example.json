@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "course-orchestrator.v1",
+  "modules": [
+    {
+      "name": "Session 01 - Example Build",
+      "sessionNumber": 1,
+      "steps": [
+        { "type": "session-headers" },
+        {
+          "type": "today-section",
+          "pageTitle": "Introduction: Example Build",
+          "notes": "Students unpack the course structure, review the build brief, and identify the checkpoints for today's prototype work.",
+          "imageUrl": "https://example.com/example-build.jpg"
+        },
+        { "type": "task-a-section", "taskFolder": "Task A" },
+        { "type": "subheader", "title": "Feedback" },
+        {
+          "type": "page",
+          "title": "Session 01 Feedback",
+          "afterHeaderTitle": "Feedback",
+          "content": [
+            {
+              "type": "markdown",
+              "value": "## Feedback\nStudents record what worked, what failed, and what they will change next lesson."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+Course Commands - Nexgen Canvas Pipeline
+========================================
+
+npm run dev -- session-headers --course-id 21 --module-name "Session 07 - Code and Wiring" --session 7
+
+npm run dev -- create --prompt "Create a quiz all about wiring up a circuit" --course-id 21
+
+npm run dev -- today-section --course-id 21 --session-name "Session 07 - Code and Wiring"   
+
+npm run dev -- task-a-section --course-id 21 --session-name "Session 07 - Code and Wiring"
+
+npm run dev -- task-b-section --course-id 21 --session-name "Session 07 - Code and Wiring"
+
+npm run dev -- task-c-section --course-id 21 --session-name "Session 07 - Code and Wiring"
+
+Orchestration
+=============
+
+The Nexgen STEM School Course Template
+--------------------------------------
+Session 01: Demo, Soldering boot camp
+Session 02: 3D Modelling + 3D Printing
+Session 03: Components Deep Dive
+Session 04: Prototyping the Circuit
+Session 05: Soldering the main assets
+Session 06: Assembly 01
+Session 07: Assembly 02 + Wiring + H/W Testing
+Session 08: Coding + Testing
+BONUS Session 09: Applications 1
+BONUS Session 10: Applications 2
+
