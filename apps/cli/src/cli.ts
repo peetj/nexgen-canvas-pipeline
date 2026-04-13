@@ -54,6 +54,7 @@ const TASK_C_DEFAULT_FOLDER_NAME = "TaskC";
 const NOTE_PLACEHOLDER_TOKEN = "[ADD NOTES]";
 const AI_PROMPT_PLACEHOLDER_TOKEN = "[ADD AI IMAGE PROMPT]";
 const IMAGE_URL_PLACEHOLDER_TOKEN = "https://example.com/your-image.jpg";
+const IMAGE_FILE_PLACEHOLDER_TOKEN = "images/your-image.jpg";
 const TASK_A_DEFAULT_PHILOSOPHY_TEXT =
   "Task A builds core confidence first: complete the essentials clearly and safely before moving into extension complexity.";
 
@@ -477,7 +478,7 @@ type TodaySectionAssets = {
   imageUrl?: string;
   aiImagePrompt?: string;
   createdFiles: string[];
-  imageSource: "local-file" | "cli-url" | "file-url" | "canvas-file-id" | "none";
+  imageSource: "local-file" | "cli-url" | "notes-url" | "canvas-file-id" | "none";
   canvasImageId?: number;
   canvasImageDisplayName?: string;
   localImagePath?: string;
@@ -779,6 +780,7 @@ function normalizeNotesText(input: string | undefined): string | undefined {
 function parseTodaySectionFrontmatter(raw: string): {
   body: string;
   pageTitle?: string;
+  imageFile?: string;
   imageUrl?: string;
   aiImagePrompt?: string;
 } {
@@ -791,6 +793,7 @@ function parseTodaySectionFrontmatter(raw: string): {
   const frontmatterText = match[1];
   const body = normalized.slice(match[0].length).replace(/^\n+/, "");
   let pageTitle: string | undefined;
+  let imageFile: string | undefined;
   let imageUrl: string | undefined;
   let aiImagePrompt: string | undefined;
 
@@ -808,6 +811,10 @@ function parseTodaySectionFrontmatter(raw: string): {
       pageTitle = value;
       continue;
     }
+    if (key === "imageFile" && value) {
+      imageFile = value;
+      continue;
+    }
     if (key === "imageUrl" && value) {
       imageUrl = value;
       continue;
@@ -820,6 +827,7 @@ function parseTodaySectionFrontmatter(raw: string): {
   return {
     body,
     pageTitle,
+    imageFile,
     imageUrl,
     aiImagePrompt
   };
@@ -838,6 +846,81 @@ function normalizeSingleLineInput(input: string | undefined): string | undefined
   if (lower.includes(AI_PROMPT_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
   if (lower.includes(IMAGE_URL_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
   return normalized;
+}
+
+function normalizeTodaySectionImageFileInput(input: string | undefined): string | undefined {
+  if (!input) return undefined;
+  const normalized = input
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !line.startsWith("#"));
+  if (!normalized) return undefined;
+  if (normalized.toLowerCase().includes(IMAGE_FILE_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
+  return normalized;
+}
+
+function buildTodaySectionNotesTemplate(bodyText?: string): string {
+  const body = (bodyText ?? `${NOTE_PLACEHOLDER_TOKEN}
+
+Write one or two short paragraphs that explain what students are doing in this session.`).trim();
+  return [
+    "---",
+    `imageFile: ${JSON.stringify(IMAGE_FILE_PLACEHOLDER_TOKEN)}`,
+    `imageUrl: ${JSON.stringify(IMAGE_URL_PLACEHOLDER_TOKEN)}`,
+    `aiImagePrompt: ${JSON.stringify(AI_PROMPT_PLACEHOLDER_TOKEN)}`,
+    "---",
+    "",
+    body,
+    ""
+  ].join("\n");
+}
+
+function renderTodaySectionNotesFile(input: {
+  body: string;
+  pageTitle?: string;
+  imageFile?: string;
+  imageUrl?: string;
+  aiImagePrompt?: string;
+}): string {
+  const frontmatterLines = ["---"];
+  if (input.pageTitle?.trim()) {
+    frontmatterLines.push(`pageTitle: ${JSON.stringify(input.pageTitle.trim())}`);
+  }
+  frontmatterLines.push(
+    `imageFile: ${JSON.stringify((input.imageFile?.trim() || IMAGE_FILE_PLACEHOLDER_TOKEN))}`,
+    `imageUrl: ${JSON.stringify((input.imageUrl?.trim() || IMAGE_URL_PLACEHOLDER_TOKEN))}`,
+    `aiImagePrompt: ${JSON.stringify((input.aiImagePrompt?.trim() || AI_PROMPT_PLACEHOLDER_TOKEN))}`,
+    "---",
+    "",
+    input.body.trim(),
+    ""
+  );
+  return frontmatterLines.join("\n");
+}
+
+async function findOptionalNotesImageFile(folderPath: string, requestedPath?: string): Promise<string | undefined> {
+  const normalized = normalizeTodaySectionImageFileInput(requestedPath);
+  if (!normalized) return undefined;
+  try {
+    return await findLocalImageFile(folderPath, normalized);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("was not found")) {
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+async function removeFileIfExists(filePath: string): Promise<void> {
+  try {
+    await fs.rm(filePath, { force: true });
+  } catch (err) {
+    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code === "ENOENT") return;
+    throw err;
+  }
 }
 
 function normalizeTaskInlineInput(input: string | undefined): string | undefined {
@@ -1203,24 +1286,16 @@ async function prepareTodaySectionAssets(input: {
     toFilesystemSegment(input.sectionTitle)
   );
   await fs.mkdir(folderPath, { recursive: true });
+  await fs.mkdir(path.resolve(folderPath, "images"), { recursive: true });
 
   const notesPath = path.resolve(folderPath, "notes.md");
   const imageUrlPath = path.resolve(folderPath, "image-url.txt");
   const aiPromptPath = path.resolve(folderPath, "ai-image-prompt.txt");
 
   const createdFiles: string[] = [];
-  const notesTemplate = `${NOTE_PLACEHOLDER_TOKEN}
-
-Write one or two short paragraphs that explain what students are doing in this session.
-`;
-  const imageTemplate = `${IMAGE_URL_PLACEHOLDER_TOKEN}
-`;
-  const aiPromptTemplate = `${AI_PROMPT_PLACEHOLDER_TOKEN}
-`;
+  const notesTemplate = buildTodaySectionNotesTemplate();
 
   if (await ensureFileWithTemplate(notesPath, notesTemplate)) createdFiles.push(notesPath);
-  if (await ensureFileWithTemplate(imageUrlPath, imageTemplate)) createdFiles.push(imageUrlPath);
-  if (await ensureFileWithTemplate(aiPromptPath, aiPromptTemplate)) createdFiles.push(aiPromptPath);
 
   let authoredNotesTextFromInput: string | undefined;
   if (input.notesText) {
@@ -1232,11 +1307,30 @@ Write one or two short paragraphs that explain what students are doing in this s
   const authoredNotesText = authoredNotesTextFromInput ?? (await readTextIfExists(notesPath));
   const parsedNotes = authoredNotesText ? parseTodaySectionFrontmatter(authoredNotesText) : { body: "" };
   const notesText = normalizeNotesText(parsedNotes.body);
+  const legacyImageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
+  const legacyAiImagePrompt = normalizeSingleLineInput(await readTextIfExists(aiPromptPath));
+  const configuredImageFile = normalizeTodaySectionImageFileInput(parsedNotes.imageFile);
+  const configuredImageUrl = normalizeSingleLineInput(input.imageUrl) ??
+    normalizeSingleLineInput(parsedNotes.imageUrl) ??
+    legacyImageUrl;
+  const configuredAiImagePrompt = normalizeSingleLineInput(input.aiImagePrompt) ??
+    normalizeSingleLineInput(parsedNotes.aiImagePrompt) ??
+    legacyAiImagePrompt;
+  const bodyForWrite = parsedNotes.body.trim() || `${NOTE_PLACEHOLDER_TOKEN}
 
-  if (authoredNotesTextFromInput !== undefined) {
-    const normalizedForWrite = authoredNotesTextFromInput.trimEnd();
-    await fs.writeFile(notesPath, `${normalizedForWrite}\n`, "utf8");
+Write one or two short paragraphs that explain what students are doing in this session.`;
+  const normalizedNotesFile = renderTodaySectionNotesFile({
+    body: bodyForWrite,
+    pageTitle: parsedNotes.pageTitle,
+    imageFile: input.imageFilePath ?? configuredImageFile,
+    imageUrl: configuredImageUrl,
+    aiImagePrompt: configuredAiImagePrompt
+  });
+  if (authoredNotesTextFromInput !== undefined || normalizedNotesFile !== `${(authoredNotesText ?? "").replace(/\r\n/g, "\n").trimEnd()}\n`) {
+    await fs.writeFile(notesPath, normalizedNotesFile, "utf8");
   }
+  await removeFileIfExists(imageUrlPath);
+  await removeFileIfExists(aiPromptPath);
 
   let imageUrl: string | undefined;
   let imageSource: TodaySectionAssets["imageSource"] = "none";
@@ -1262,21 +1356,17 @@ Write one or two short paragraphs that explain what students are doing in this s
     canvasImageDisplayName = canvasFile.display_name ?? canvasFile.filename;
     imageSource = "canvas-file-id";
   } else {
-    localImagePath = await findLocalImageFile(folderPath, input.imageFilePath);
+    if (input.imageFilePath) {
+      localImagePath = await findLocalImageFile(folderPath, input.imageFilePath);
+    } else {
+      localImagePath = await findOptionalNotesImageFile(folderPath, configuredImageFile);
+      if (!localImagePath) {
+        localImagePath = await findLocalImageFile(folderPath);
+      }
+    }
     imageUrl = normalizeSingleLineInput(input.imageUrl);
     if (!imageUrl) {
-      imageUrl =
-        normalizeSingleLineInput(parsedNotes.imageUrl) ??
-        normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
-    } else {
-      await fs.writeFile(imageUrlPath, `${imageUrl}\n`, "utf8");
-    }
-
-    if (!input.imageUrl && parsedNotes.imageUrl) {
-      const normalizedImageUrl = normalizeSingleLineInput(parsedNotes.imageUrl);
-      if (normalizedImageUrl) {
-        await fs.writeFile(imageUrlPath, `${normalizedImageUrl}\n`, "utf8");
-      }
+      imageUrl = configuredImageUrl;
     }
 
     if (localImagePath) {
@@ -1294,24 +1384,13 @@ Write one or two short paragraphs that explain what students are doing in this s
     } else if (input.imageUrl && normalizeSingleLineInput(input.imageUrl)) {
       imageSource = "cli-url";
     } else if (imageUrl) {
-      imageSource = "file-url";
+      imageSource = "notes-url";
     }
   }
 
   let aiImagePrompt = normalizeSingleLineInput(input.aiImagePrompt);
   if (!aiImagePrompt) {
-    aiImagePrompt =
-      normalizeSingleLineInput(parsedNotes.aiImagePrompt) ??
-      normalizeSingleLineInput(await readTextIfExists(aiPromptPath));
-  } else {
-    await fs.writeFile(aiPromptPath, `${aiImagePrompt}\n`, "utf8");
-  }
-
-  if (!input.aiImagePrompt && parsedNotes.aiImagePrompt) {
-    const normalizedAiPrompt = normalizeSingleLineInput(parsedNotes.aiImagePrompt);
-    if (normalizedAiPrompt) {
-      await fs.writeFile(aiPromptPath, `${normalizedAiPrompt}\n`, "utf8");
-    }
+    aiImagePrompt = configuredAiImagePrompt;
   }
 
   return {
@@ -2621,8 +2700,8 @@ async function runTodaySectionWorkflow(input: {
     );
   } else if (assets.imageSource === "cli-url") {
     console.log("Image mode: --image-url input");
-  } else if (assets.imageSource === "file-url") {
-    console.log("Image mode: image-url.txt");
+  } else if (assets.imageSource === "notes-url") {
+    console.log("Image mode: notes.md imageUrl");
   } else if (built.imageUrl) {
     console.log("Image mode: auto-detected from existing module intro content");
   } else {
