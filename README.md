@@ -82,12 +82,19 @@ Options:
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--from-file <path>`: Path to Nexgen quiz JSON input.
 - `--prompt <text>`: Prompt used to generate quiz content via quiz agent.
+- `--prompt-file <path>`: Prompt file used to generate quiz content via quiz agent.
+- `--title <title>`: Optional quiz title override.
+- `--module-name <name>`: Optional module name to place the quiz into.
+- `--after-header-title <title>`: Optional subheader title to place the quiz after. Requires `--module-name`.
+- `--publish`: Publish quiz after create. Default is unpublished.
+- `--skip-existing`: Reuse an existing quiz with the same target title.
 - `--difficulty <level>`: Optional agent difficulty preference. One of `easy`, `medium`, `hard`, `mixed`.
 - `--dry-run`: Validate/show summary only; no Canvas upload.
 
 Rules:
-- Provide exactly one of `--from-file` or `--prompt`.
-- `--difficulty` only applies with `--prompt`.
+- Provide exactly one of `--from-file`, `--prompt`, or `--prompt-file`.
+- `--difficulty` only applies with `--prompt` or `--prompt-file`.
+- If `--module-name` is provided, the quiz is placed under `QUIZ` by default unless `--after-header-title` is set explicitly.
 - For file-based quizzes, set `settings.shuffleAnswers: true` in the JSON if you want the correct choice position randomized before upload.
 - Agent-generated quizzes now request shuffled answers by default.
 
@@ -97,6 +104,7 @@ npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.exa
 npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.example.json
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --course-id 12345 --dry-run
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --difficulty hard --course-id 12345 --dry-run
+npx tsx apps/cli/src/cli.ts create --prompt-file apps/cli/session-assets/example-course/Session\ 01\ -\ Example\ Build/QUIZ/prompt.md --title "Session 01 Quiz" --module-name "Session 01 - Example Build" --skip-existing
 
 # npm wrapper form
 npm run dev -- create --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
@@ -432,12 +440,14 @@ Blueprint notes:
 - `v2` is the recommended authoring format when you want to generate multiple session modules from one shared structure.
 - Placeholders supported in `v2` string fields include `{n}`, `{nn}`, `{topic}`, and custom values from `sessions[].variables`.
 - Each module entry can create the module if missing, then run ordered workflow steps.
-- Supported step types: `session-headers`, `today-section`, `task-a-section`, `task-b-section`, `task-c-section`, `clone-survey`, `create-survey`, `subheader`, `page`.
+- Supported step types: `session-headers`, `today-section`, `task-a-section`, `task-b-section`, `task-c-section`, `create-quiz`, `clone-survey`, `create-survey`, `subheader`, `page`.
 - `page` steps use a typed `content` array. Supported content block types: `markdown`, `markdownFile`, `html`, `htmlFile`, `imageFile`.
 - `today-section` and task section steps reuse the same logic as the standalone commands.
+- `create-quiz` reuses the standalone quiz creation workflow and can generate a quiz from the cloud agent using a session-local prompt file under `QUIZ/prompt.md`.
 - `--prepare-assets` is the recommended first pass for session-backed workflows. It materializes local `session-assets` folders and validates file-backed survey/page inputs before any live Canvas run.
 - `clone-survey` reuses the survey clone workflow and can clone from another course into the target course, then place the survey under a module subheader such as `Weekly Check-In`.
 - `clone-survey` step fields: `sourceTitle`, `title`, optional `sourceCourseId`, optional `afterHeaderTitle`, optional `skipExisting`.
+- `create-quiz` step fields: optional `title`, optional `fromFile`, optional `prompt`, optional `promptFile`, optional `difficulty`, optional `afterHeaderTitle`, optional `skipExisting`, optional `publish`.
 - `create-survey` creates a survey from a JSON file and can place it under a module subheader such as `Weekly Check-In`.
 - `create-survey` step fields: `fromFile`, optional `title`, optional `afterHeaderTitle`, optional `skipExisting`, optional `publish`.
 - Recommended repo layout:
@@ -482,6 +492,17 @@ npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/c
   "fromFile": "shared/weekly-check-in.survey.json",
   "title": "Weekly Check-In-Session {nn}",
   "afterHeaderTitle": "Weekly Check-In",
+  "skipExisting": true
+}
+```
+
+`create-quiz` step example:
+
+```json
+{
+  "type": "create-quiz",
+  "title": "Session {nn} Quiz",
+  "difficulty": "mixed",
   "skipExisting": true
 }
 ```

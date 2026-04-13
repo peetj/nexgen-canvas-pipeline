@@ -11,6 +11,7 @@ apps/cli/session-assets/<course-name>/
   <session-name>/
     What we are doing Today/
       images/
+    QUIZ/
     Task A/
     Task B/
     Task C/
@@ -21,5 +22,6 @@ Notes:
 - `pages/` is for generic page content referenced from `page` steps in `orchestrator.json`.
 - `<session-name>/...` contains workflow-backed working files for session-specific commands such as `today-section` and the task sections.
 - For `today-section`, prefer editing `<session-name>/What we are doing Today/notes.md` directly. Keep image metadata in the `notes.md` frontmatter using `imageFile`, `imageUrl`, and `aiImagePrompt`.
+- For session quizzes, keep the cloud-agent prompt in `<session-name>/QUIZ/prompt.md`.
 - Use `today-section.notesFile` in the blueprint only as an override when you intentionally want to source content from somewhere else.
 - When `course-orchestrate` runs without `--assets-root`, it uses `apps/cli/session-assets/<course-name>/` automatically.

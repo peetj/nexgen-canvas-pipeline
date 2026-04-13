@@ -55,6 +55,7 @@ const NOTE_PLACEHOLDER_TOKEN = "[ADD NOTES]";
 const AI_PROMPT_PLACEHOLDER_TOKEN = "[ADD AI IMAGE PROMPT]";
 const IMAGE_URL_PLACEHOLDER_TOKEN = "https://example.com/your-image.jpg";
 const IMAGE_FILE_PLACEHOLDER_TOKEN = "images/your-image.jpg";
+const QUIZ_PROMPT_PLACEHOLDER_TOKEN = "[ADD QUIZ PROMPT]";
 const TASK_A_DEFAULT_PHILOSOPHY_TEXT =
   "Task A builds core confidence first: complete the essentials clearly and safely before moving into extension complexity.";
 
@@ -559,6 +560,13 @@ type PreparedTodaySectionStepInput = {
   aiImagePrompt?: string;
 };
 
+type PreparedCreateQuizStepInput = {
+  quizFilePath?: string;
+  promptText?: string;
+  promptFilePath?: string;
+  difficulty?: QuizDifficulty;
+};
+
 type OrchestratorModuleSpec = {
   name: string;
   sessionNumber?: number;
@@ -643,6 +651,18 @@ type OrchestratorCreateSurveyStep = {
   publish?: boolean;
 };
 
+type OrchestratorCreateQuizStep = {
+  type: "create-quiz";
+  title?: string;
+  fromFile?: string;
+  prompt?: string;
+  promptFile?: string;
+  difficulty?: QuizDifficulty;
+  afterHeaderTitle?: string;
+  skipExisting?: boolean;
+  publish?: boolean;
+};
+
 type OrchestratorStep =
   | OrchestratorSessionHeadersStep
   | OrchestratorSubheaderStep
@@ -650,7 +670,8 @@ type OrchestratorStep =
   | OrchestratorTodaySectionStep
   | OrchestratorTaskSectionStep
   | OrchestratorCloneSurveyStep
-  | OrchestratorCreateSurveyStep;
+  | OrchestratorCreateSurveyStep
+  | OrchestratorCreateQuizStep;
 const LOCAL_VIDEO_EXTENSIONS = new Set([
   ".mp4",
   ".webm",
@@ -662,6 +683,8 @@ const TASK_A_TEMPLATE_FILE_NAMES = new Set(["notes.md"]);
 const MAX_LOCAL_IMAGE_BYTES = 450 * 1024;
 const LOCAL_IMAGE_WEBP_WIDTHS = [1920, 1600, 1366, 1280, 1024, 900, 768, 640];
 const LOCAL_IMAGE_WEBP_QUALITIES = [82, 76, 70, 64, 58, 52, 46];
+const QUIZ_SECTION_ASSET_TITLE = "QUIZ";
+const QUIZ_PROMPT_FILE_NAME = "prompt.md";
 
 function toFilesystemSegment(input: string): string {
   const cleaned = input
@@ -777,6 +800,14 @@ function normalizeNotesText(input: string | undefined): string | undefined {
   return normalized;
 }
 
+function normalizeQuizPromptText(input: string | undefined): string | undefined {
+  if (!input) return undefined;
+  const normalized = input.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return undefined;
+  if (normalized.toLowerCase().includes(QUIZ_PROMPT_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
+  return normalized;
+}
+
 function parseTodaySectionFrontmatter(raw: string): {
   body: string;
   pageTitle?: string;
@@ -876,6 +907,15 @@ Write one or two short paragraphs that explain what students are doing in this s
   ].join("\n");
 }
 
+function buildQuizPromptTemplate(sessionName: string): string {
+  const meta = parseSessionMetadata(sessionName);
+  return `${QUIZ_PROMPT_PLACEHOLDER_TOKEN}
+
+Create a five-question multiple-choice quiz for ${sessionName}.
+Focus on the key concepts students should retain from ${meta.topic}.
+Target Year 7-10 and return concise, student-friendly questions.`;
+}
+
 function renderTodaySectionNotesFile(input: {
   body: string;
   pageTitle?: string;
@@ -921,6 +961,53 @@ async function removeFileIfExists(filePath: string): Promise<void> {
     if (code === "ENOENT") return;
     throw err;
   }
+}
+
+async function prepareQuizAssets(input: {
+  assetsRoot: string;
+  sessionName: string;
+  promptText?: string;
+  promptFilePath?: string;
+}): Promise<{
+  folderPath: string;
+  promptPath: string;
+  promptText?: string;
+  createdFiles: string[];
+}> {
+  const folderPath = path.resolve(
+    input.assetsRoot,
+    toFilesystemSegment(input.sessionName),
+    toFilesystemSegment(QUIZ_SECTION_ASSET_TITLE)
+  );
+  await fs.mkdir(folderPath, { recursive: true });
+
+  const promptPath = path.resolve(folderPath, QUIZ_PROMPT_FILE_NAME);
+  const createdFiles: string[] = [];
+  if (await ensureFileWithTemplate(promptPath, `${buildQuizPromptTemplate(input.sessionName)}\n`)) {
+    createdFiles.push(promptPath);
+  }
+
+  let authoredPromptTextFromInput: string | undefined;
+  if (input.promptText) {
+    authoredPromptTextFromInput = input.promptText.replace(/\r\n/g, "\n").trim();
+  } else if (input.promptFilePath) {
+    authoredPromptTextFromInput = await fs.readFile(path.resolve(input.promptFilePath), "utf8");
+  }
+
+  if (authoredPromptTextFromInput !== undefined) {
+    await fs.writeFile(promptPath, `${authoredPromptTextFromInput.trimEnd()}\n`, "utf8");
+  }
+
+  const promptText = normalizeQuizPromptText(
+    authoredPromptTextFromInput ?? (await readTextIfExists(promptPath))
+  );
+
+  return {
+    folderPath,
+    promptPath,
+    promptText,
+    createdFiles
+  };
 }
 
 function normalizeTaskInlineInput(input: string | undefined): string | undefined {
@@ -3012,6 +3099,56 @@ async function buildPreparedTodaySectionStepInput(
   };
 }
 
+async function buildPreparedCreateQuizStepInput(
+  step: OrchestratorCreateQuizStep,
+  assetsRoot: string,
+  blueprintDir: string
+): Promise<PreparedCreateQuizStepInput> {
+  return {
+    quizFilePath: step.fromFile
+      ? await resolveOrchestratorContentPath({
+          filePath: step.fromFile,
+          assetsRoot,
+          blueprintDir
+        })
+      : undefined,
+    promptText: step.prompt,
+    promptFilePath: step.promptFile
+      ? await resolveOrchestratorContentPath({
+          filePath: step.promptFile,
+          assetsRoot,
+          blueprintDir
+        })
+      : undefined,
+    difficulty: step.difficulty
+  };
+}
+
+async function prepareCreateQuizStepAssets(input: {
+  sessionName: string;
+  assetsRoot: string;
+  promptText?: string;
+  promptFilePath?: string;
+}): Promise<void> {
+  const assets = await prepareQuizAssets({
+    assetsRoot: input.assetsRoot,
+    sessionName: input.sessionName,
+    promptText: input.promptText,
+    promptFilePath: input.promptFilePath
+  });
+
+  console.log(`Quiz assets: ${assets.folderPath}`);
+  if (assets.createdFiles.length > 0) {
+    console.log("Created local quiz prompt templates:");
+    for (const createdPath of assets.createdFiles) {
+      console.log(`- ${createdPath}`);
+    }
+  } else {
+    console.log("Local quiz prompt templates already present.");
+  }
+  console.log(`Prompt source: ${assets.promptText ? "ready" : "placeholder"}`);
+}
+
 async function runCloneSurveyBatchWorkflow(input: {
   sourceCourseId: number;
   targetCourseId: number;
@@ -3197,6 +3334,195 @@ async function runModuleCloneSurveyWorkflow(input: {
   if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
     console.log("Survey module item placement already correct.");
   }
+  console.log(`Quiz URL: ${env.canvasBaseUrl}/courses/${input.courseId}/quizzes/${targetQuiz.id}`);
+}
+
+async function loadQuizFromFile(filePath: string): Promise<ReturnType<typeof validateNexgenQuiz>> {
+  const raw = JSON.parse(await fs.readFile(filePath, "utf8"));
+  return validateNexgenQuiz(raw);
+}
+
+async function runCreateQuizWorkflow(input: {
+  courseId: number;
+  title?: string;
+  quizFilePath?: string;
+  promptText?: string;
+  promptFilePath?: string;
+  difficulty?: QuizDifficulty;
+  publish: boolean;
+  skipExisting: boolean;
+  moduleName?: string;
+  afterHeaderTitle?: string;
+  dryRun: boolean;
+  sessionName?: string;
+  assetsRoot?: string;
+  client?: CanvasClient;
+}): Promise<void> {
+  if (input.quizFilePath && (input.promptText || input.promptFilePath || input.difficulty)) {
+    throw new Error("Quiz creation accepts either a quiz JSON file or a prompt source, not both.");
+  }
+  if (input.promptText && input.promptFilePath) {
+    throw new Error("Use either prompt text or prompt file, not both.");
+  }
+
+  const client = input.client ?? new CanvasClient();
+  let sourceQuiz: ReturnType<typeof validateNexgenQuiz>;
+  let sourceLabel: string;
+  let sessionPromptAssets:
+    | {
+        folderPath: string;
+        promptPath: string;
+        promptText?: string;
+        createdFiles: string[];
+      }
+    | undefined;
+
+  if (input.quizFilePath) {
+    sourceQuiz = await loadQuizFromFile(input.quizFilePath);
+    sourceLabel = `JSON file ${input.quizFilePath}`;
+  } else {
+    let promptText = normalizeQuizPromptText(input.promptText);
+
+    if (input.sessionName && input.assetsRoot) {
+      sessionPromptAssets = await prepareQuizAssets({
+        assetsRoot: input.assetsRoot,
+        sessionName: input.sessionName,
+        promptText: input.promptText,
+        promptFilePath: input.promptFilePath
+      });
+      promptText = sessionPromptAssets.promptText;
+      sourceLabel = `session prompt ${sessionPromptAssets.promptPath}`;
+    } else if (!promptText && input.promptFilePath) {
+      promptText = normalizeQuizPromptText(await fs.readFile(input.promptFilePath, "utf8"));
+      sourceLabel = `prompt file ${input.promptFilePath}`;
+    } else {
+      sourceLabel = "inline prompt";
+    }
+
+    if (!promptText) {
+      throw new Error(
+        input.sessionName
+          ? `Quiz prompt is empty for session "${input.sessionName}". Update ${QUIZ_SECTION_ASSET_TITLE}/${QUIZ_PROMPT_FILE_NAME} and retry.`
+          : "Quiz prompt is empty. Provide prompt text or a prompt file."
+      );
+    }
+
+    sourceQuiz = validateNexgenQuiz(await generateQuizFromAgent(promptText, { difficulty: input.difficulty }));
+  }
+
+  const effectiveTitle = input.title ?? sourceQuiz.title;
+  const mapped = mapToCanvasQuiz({
+    ...sourceQuiz,
+    title: effectiveTitle
+  });
+  mapped.canvasQuiz.published = input.publish;
+
+  const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
+
+  const effectiveAfterHeaderTitle = input.moduleName
+    ? (input.afterHeaderTitle ?? QUIZ_SECTION_ASSET_TITLE)
+    : undefined;
+  let module: CanvasModuleSummary | undefined;
+  let moduleItems: CanvasModuleItem[] = [];
+  let insertionPosition: number | undefined;
+  let existingModuleItem: CanvasModuleItem | undefined;
+  if (input.moduleName) {
+    module = await resolveModuleByName(client, input.courseId, input.moduleName);
+    moduleItems = await client.listModuleItems(input.courseId, module.id);
+    insertionPosition = resolveModulePageInsertionPosition(moduleItems, effectiveAfterHeaderTitle);
+    existingModuleItem = findModuleQuizItem(moduleItems, effectiveTitle, existingQuiz?.id);
+  }
+
+  console.log(`Course: ${input.courseId}`);
+  console.log(`Quiz source: ${sourceLabel}`);
+  console.log(`Quiz title: ${effectiveTitle}`);
+  console.log(`Questions: ${sourceQuiz.questions.length} (expected 5)`);
+  if (input.difficulty) {
+    console.log(`Requested difficulty: ${input.difficulty}`);
+  }
+  if (sessionPromptAssets) {
+    console.log(`Prompt assets folder: ${sessionPromptAssets.folderPath}`);
+    if (sessionPromptAssets.createdFiles.length > 0) {
+      console.log("Created local quiz prompt templates:");
+      for (const createdPath of sessionPromptAssets.createdFiles) {
+        console.log(`- ${createdPath}`);
+      }
+    }
+    console.log(`Prompt source: ${sessionPromptAssets.promptText ? "ready" : "placeholder"}`);
+  }
+  if (input.moduleName && module && insertionPosition !== undefined) {
+    console.log(`Module: ${module.name} (${module.id})`);
+    if (effectiveAfterHeaderTitle) {
+      console.log(`Insert after subheader: ${effectiveAfterHeaderTitle}`);
+    }
+    console.log(`Target module position: ${insertionPosition}`);
+  }
+
+  if (input.dryRun) {
+    console.log(
+      existingQuiz
+        ? `Dry run: existing quiz will be reused (${existingQuiz.id}).`
+        : "Dry run: quiz would be created."
+    );
+    if (input.moduleName) {
+      if (!existingModuleItem) {
+        console.log("Dry run: quiz would be added to the module.");
+      } else if (existingModuleItem.position !== insertionPosition) {
+        console.log("Dry run: quiz module item would be moved to the target section.");
+      } else {
+        console.log("Dry run: quiz module item placement already correct.");
+      }
+    }
+    return;
+  }
+
+  if (existingQuiz && !input.skipExisting) {
+    throw new Error(`Quiz "${effectiveTitle}" already exists in course ${input.courseId}. Use skipExisting to reuse it.`);
+  }
+
+  const targetQuiz =
+    existingQuiz ??
+    await (async () => {
+      const created = await client.createQuiz(input.courseId, mapped.canvasQuiz);
+      for (const question of mapped.canvasQuestions) {
+        await client.addQuizQuestion(input.courseId, created.id, question);
+      }
+      if (mapped.canvasQuiz.published === false) {
+        try {
+          await client.updateQuiz(input.courseId, created.id, { published: true });
+          await client.updateQuiz(input.courseId, created.id, { published: false });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.warn(`Warning: unable to refresh quiz question count. You can publish/unpublish manually. ${message}`);
+        }
+      }
+      return created;
+    })();
+
+  if (existingQuiz) {
+    console.log(`Using existing quiz: ${targetQuiz.title} (${targetQuiz.id})`);
+  } else {
+    console.log(`Created quiz: ${targetQuiz.title} (${targetQuiz.id})`);
+  }
+
+  if (module && insertionPosition !== undefined) {
+    const placementResult = await ensureModuleQuizPlacement({
+      client,
+      courseId: input.courseId,
+      moduleId: module.id,
+      moduleItems,
+      quizTitle: effectiveTitle,
+      quizId: targetQuiz.id,
+      insertionPosition
+    });
+
+    if (placementResult.createdModuleItem) console.log("Added quiz to session module.");
+    if (placementResult.movedModuleItem) console.log("Moved quiz module item to target section.");
+    if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
+      console.log("Quiz module item placement already correct.");
+    }
+  }
+
   console.log(`Quiz URL: ${env.canvasBaseUrl}/courses/${input.courseId}/quizzes/${targetQuiz.id}`);
 }
 
@@ -3542,6 +3868,28 @@ function interpolateOrchestratorStep(
         skipExisting: step.skipExisting,
         publish: step.publish
       };
+    case "create-quiz":
+      return {
+        type: step.type,
+        title: step.title
+          ? interpolateTemplateString(step.title, context, `${pathLabel}.title`)
+          : undefined,
+        fromFile: step.fromFile
+          ? interpolateTemplateString(step.fromFile, context, `${pathLabel}.fromFile`)
+          : undefined,
+        prompt: step.prompt
+          ? interpolateTemplateString(step.prompt, context, `${pathLabel}.prompt`)
+          : undefined,
+        promptFile: step.promptFile
+          ? interpolateTemplateString(step.promptFile, context, `${pathLabel}.promptFile`)
+          : undefined,
+        difficulty: step.difficulty,
+        afterHeaderTitle: step.afterHeaderTitle
+          ? interpolateTemplateString(step.afterHeaderTitle, context, `${pathLabel}.afterHeaderTitle`)
+          : undefined,
+        skipExisting: step.skipExisting,
+        publish: step.publish
+      };
   }
 }
 
@@ -3651,6 +3999,32 @@ function parseOrchestratorStep(input: unknown, pathLabel: string): OrchestratorS
         skipExisting: optionalBoolean(record.skipExisting, `${pathLabel}.skipExisting`),
         publish: optionalBoolean(record.publish, `${pathLabel}.publish`)
       };
+    case "create-quiz": {
+      const fromFile = optionalString(record.fromFile, `${pathLabel}.fromFile`);
+      const prompt = optionalString(record.prompt, `${pathLabel}.prompt`);
+      const promptFile = optionalString(record.promptFile, `${pathLabel}.promptFile`);
+      if (fromFile && (prompt || promptFile)) {
+        throw new Error(`${pathLabel} accepts either fromFile or prompt/promptFile, not both.`);
+      }
+      if (prompt && promptFile) {
+        throw new Error(`${pathLabel} accepts either prompt or promptFile, not both.`);
+      }
+      const difficultyRaw = optionalString(record.difficulty, `${pathLabel}.difficulty`);
+      if (fromFile && difficultyRaw) {
+        throw new Error(`${pathLabel}.difficulty can only be used with prompt-based quiz creation.`);
+      }
+      return {
+        type,
+        title: optionalString(record.title, `${pathLabel}.title`),
+        fromFile,
+        prompt,
+        promptFile,
+        difficulty: difficultyRaw ? parseQuizDifficulty(difficultyRaw, `${pathLabel}.difficulty`) : undefined,
+        afterHeaderTitle: optionalString(record.afterHeaderTitle, `${pathLabel}.afterHeaderTitle`),
+        skipExisting: optionalBoolean(record.skipExisting, `${pathLabel}.skipExisting`),
+        publish: optionalBoolean(record.publish, `${pathLabel}.publish`)
+      };
+    }
     default:
       throw new Error(`${pathLabel}.type "${type}" is not supported.`);
   }
@@ -3824,6 +4198,21 @@ async function runCourseOrchestrateWorkflow(input: {
       for (const step of moduleSpec.steps) {
         console.log(`-- Step: ${step.type}`);
         switch (step.type) {
+          case "create-quiz": {
+            const prepared = await buildPreparedCreateQuizStepInput(step, input.assetsRoot, blueprintDir);
+            if (prepared.quizFilePath) {
+              const quiz = await loadQuizFromFile(prepared.quizFilePath);
+              console.log(`Quiz JSON ok: ${prepared.quizFilePath} (${quiz.questions.length} question(s))`);
+            } else {
+              await prepareCreateQuizStepAssets({
+                sessionName: moduleSpec.name,
+                assetsRoot: input.assetsRoot,
+                promptText: prepared.promptText,
+                promptFilePath: prepared.promptFilePath
+              });
+            }
+            break;
+          }
           case "today-section": {
             const prepared = await buildPreparedTodaySectionStepInput(step, input.assetsRoot, blueprintDir);
             await prepareTodaySectionStepAssets({
@@ -3968,6 +4357,30 @@ async function runCourseOrchestrateWorkflow(input: {
           continue;
         }
 
+        if (step.type === "create-quiz") {
+          const prepared = await buildPreparedCreateQuizStepInput(step, input.assetsRoot, blueprintDir);
+          if (prepared.quizFilePath) {
+            const quiz = await loadQuizFromFile(prepared.quizFilePath);
+            const effectiveTitle = step.title ?? quiz.title;
+            const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
+            console.log(
+              existingQuiz
+                ? `Dry run: existing quiz "${effectiveTitle}" will be reused (${existingQuiz.id}).`
+                : `Dry run: quiz "${effectiveTitle}" would be created after module creation from ${prepared.quizFilePath}.`
+            );
+          } else {
+            await prepareCreateQuizStepAssets({
+              sessionName: moduleSpec.name,
+              assetsRoot: input.assetsRoot,
+              promptText: prepared.promptText,
+              promptFilePath: prepared.promptFilePath
+            });
+            console.log("Dry run: quiz would be generated from the cloud agent after module creation.");
+          }
+          console.log(`Dry run: quiz would be placed under "${step.afterHeaderTitle ?? QUIZ_SECTION_ASSET_TITLE}" after module creation.`);
+          continue;
+        }
+
         console.log("Dry run: full preview requires the module to exist first; step skipped.");
         continue;
       }
@@ -4083,6 +4496,26 @@ async function runCourseOrchestrateWorkflow(input: {
             client
           });
           break;
+        case "create-quiz": {
+          const prepared = await buildPreparedCreateQuizStepInput(step, input.assetsRoot, blueprintDir);
+          await runCreateQuizWorkflow({
+            courseId: input.courseId,
+            title: step.title,
+            quizFilePath: prepared.quizFilePath,
+            promptText: prepared.promptText,
+            promptFilePath: prepared.promptFilePath,
+            difficulty: prepared.difficulty,
+            publish: step.publish ?? input.publish,
+            skipExisting: step.skipExisting ?? true,
+            moduleName: moduleSpec.name,
+            afterHeaderTitle: step.afterHeaderTitle,
+            dryRun: input.dryRun,
+            sessionName: moduleSpec.name,
+            assetsRoot: input.assetsRoot,
+            client
+          });
+          break;
+        }
       }
     }
   }
@@ -4093,68 +4526,47 @@ program.command("create")
   .option("--course-id <id>", "Canvas course id to upload to", String(env.canvasTestCourseId))
   .option("--from-file <path>", "Load Nexgen quiz JSON from file")
   .option("--prompt <text>", "Generate quiz from agent using a prompt")
+  .option("--prompt-file <path>", "Generate quiz from agent using a prompt file")
+  .option("--title <title>", "Optional title override")
+  .option("--module-name <name>", "Optional module name to place the quiz into")
+  .option("--after-header-title <title>", "Optional subheader title to place the quiz after. Requires --module-name.")
+  .option("--publish", "Publish quiz after create. Default is unpublished.", false)
+  .option("--skip-existing", "Reuse an existing quiz with the same target title.", false)
   .option("--difficulty <level>", "Difficulty for agent-generated quiz: easy, medium, hard, or mixed")
   .option("--dry-run", "Validate and show a summary without uploading", false)
   .action(async (opts) => {
     const courseId = Number(opts.courseId);
 
-    if (!opts.fromFile && !opts.prompt) {
-      throw new Error("Provide either --from-file or --prompt.");
+    if (!opts.fromFile && !opts.prompt && !opts.promptFile) {
+      throw new Error("Provide one of --from-file, --prompt, or --prompt-file.");
     }
-    if (opts.fromFile && opts.prompt) {
-      throw new Error("Provide only one of --from-file or --prompt.");
+    if ([opts.fromFile, opts.prompt, opts.promptFile].filter(Boolean).length > 1) {
+      throw new Error("Provide only one source: --from-file, --prompt, or --prompt-file.");
     }
     if (opts.fromFile && opts.difficulty) {
-      throw new Error("--difficulty can only be used with --prompt.");
+      throw new Error("--difficulty can only be used with --prompt or --prompt-file.");
+    }
+    if (opts.afterHeaderTitle && !opts.moduleName) {
+      throw new Error("--after-header-title requires --module-name.");
     }
 
     const difficulty = opts.difficulty
       ? parseQuizDifficulty(String(opts.difficulty), "--difficulty")
       : undefined;
 
-    let raw: unknown;
-
-    if (opts.fromFile) {
-      const txt = await fs.readFile(String(opts.fromFile), "utf8");
-      raw = JSON.parse(txt);
-    } else {
-      raw = await generateQuizFromAgent(String(opts.prompt), { difficulty });
-    }
-
-    const quiz = validateNexgenQuiz(raw);
-    const mapped = mapToCanvasQuiz(quiz);
-
-    console.log(`Quiz: ${quiz.title}`);
-    console.log(`Questions: ${quiz.questions.length} (expected 5)`);
-    console.log(`Target course: ${courseId}`);
-    if (difficulty) {
-      console.log(`Requested difficulty: ${difficulty}`);
-    }
-    if (opts.dryRun) {
-      console.log("Dry run: no upload performed.");
-      return;
-    }
-
-    const client = new CanvasClient();
-    const created = await client.createQuiz(courseId, mapped.canvasQuiz);
-
-    for (const q of mapped.canvasQuestions) {
-      await client.addQuizQuestion(courseId, created.id, q);
-    }
-
-    if (mapped.canvasQuiz.published === false) {
-      try {
-        await client.updateQuiz(courseId, created.id, { published: true });
-        await client.updateQuiz(courseId, created.id, { published: false });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.warn(`Warning: unable to refresh quiz question count. You can publish/unpublish manually. ${message}`);
-      }
-    }
-
-    const urlGuess = created.html_url ?? `${env.canvasBaseUrl}/courses/${courseId}/quizzes/${created.id}`;
-    console.log(`Created quiz id: ${created.id}`);
-    console.log(`Quiz URL: ${urlGuess}`);
+    await runCreateQuizWorkflow({
+      courseId,
+      title: opts.title ? String(opts.title) : undefined,
+      quizFilePath: opts.fromFile ? path.resolve(String(opts.fromFile)) : undefined,
+      promptText: opts.prompt ? String(opts.prompt) : undefined,
+      promptFilePath: opts.promptFile ? path.resolve(String(opts.promptFile)) : undefined,
+      difficulty,
+      publish: Boolean(opts.publish),
+      skipExisting: Boolean(opts.skipExisting),
+      moduleName: opts.moduleName ? String(opts.moduleName) : undefined,
+      afterHeaderTitle: opts.afterHeaderTitle ? String(opts.afterHeaderTitle) : undefined,
+      dryRun: Boolean(opts.dryRun)
+    });
   });
 
 program.command("course-files-scaffold")
