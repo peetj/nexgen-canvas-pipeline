@@ -11,7 +11,7 @@
       },
       {
         "type": "create-quiz",
-        "title": "Session {nn} Quiz",
+        "title": "{topic} Quiz",
         "difficulty": "mixed",
         "skipExisting": true
       },

@@ -104,7 +104,7 @@ npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.exa
 npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.example.json
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --course-id 12345 --dry-run
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --difficulty hard --course-id 12345 --dry-run
-npx tsx apps/cli/src/cli.ts create --prompt-file apps/cli/session-assets/example-course/Session\ 01\ -\ Example\ Build/QUIZ/prompt.md --title "Session 01 Quiz" --module-name "Session 01 - Example Build" --skip-existing
+npx tsx apps/cli/src/cli.ts create --prompt-file apps/cli/session-assets/example-course/Session\ 01\ -\ Example\ Build/QUIZ/prompt.md --title "Example Build Quiz" --module-name "Session 01 - Example Build" --skip-existing
 
 # npm wrapper form
 npm run dev -- create --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
@@ -504,7 +504,7 @@ npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/c
 ```json
 {
   "type": "create-quiz",
-  "title": "Session {nn} Quiz",
+  "title": "{topic} Quiz",
   "difficulty": "mixed",
   "skipExisting": true
 }

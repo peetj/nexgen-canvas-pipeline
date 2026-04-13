@@ -21,6 +21,7 @@ export type CanvasModuleItem = {
   title: string;
   type: string;
   position: number;
+  indent?: number;
   content_id?: number | null;
   page_url?: string | null;
 };
@@ -180,7 +181,7 @@ export class CanvasClient {
   async updateQuiz(
     courseId: number,
     quizId: number,
-    quiz: { published?: boolean }
+    quiz: { title?: string; published?: boolean }
   ): Promise<{ id: number; published?: boolean; question_count?: number }> {
     return this.request({
       method: "PUT",
@@ -395,7 +396,7 @@ export class CanvasClient {
   async createModulePageItem(
     courseId: number,
     moduleId: number,
-    input: { title?: string; pageUrl: string; position?: number }
+    input: { title?: string; pageUrl: string; position?: number; indent?: number }
   ): Promise<{ id: number; title: string; position: number; page_url?: string }> {
     return this.request({
       method: "POST",
@@ -405,7 +406,8 @@ export class CanvasClient {
           type: "Page",
           title: input.title,
           page_url: input.pageUrl,
-          position: input.position
+          position: input.position,
+          indent: input.indent
         }
       }
     });
@@ -414,7 +416,7 @@ export class CanvasClient {
   async createModuleQuizItem(
     courseId: number,
     moduleId: number,
-    input: { title?: string; quizId: number; position?: number }
+    input: { title?: string; quizId: number; position?: number; indent?: number }
   ): Promise<{ id: number; title: string; position: number; content_id?: number }> {
     return this.request({
       method: "POST",
@@ -424,7 +426,8 @@ export class CanvasClient {
           type: "Quiz",
           title: input.title,
           content_id: input.quizId,
-          position: input.position
+          position: input.position,
+          indent: input.indent
         }
       }
     });
@@ -434,12 +437,14 @@ export class CanvasClient {
     courseId: number,
     moduleId: number,
     itemId: number,
-    position: number
+    position: number,
+    indent?: number,
+    title?: string
   ): Promise<{ id: number; title: string; position: number }> {
     return this.request({
       method: "PUT",
       path: `/api/v1/courses/${courseId}/modules/${moduleId}/items/${itemId}`,
-      body: { module_item: { position } }
+      body: { module_item: { position, indent, title } }
     });
   }
 }

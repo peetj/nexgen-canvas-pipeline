@@ -690,6 +690,7 @@ const LOCAL_IMAGE_WEBP_WIDTHS = [1920, 1600, 1366, 1280, 1024, 900, 768, 640];
 const LOCAL_IMAGE_WEBP_QUALITIES = [82, 76, 70, 64, 58, 52, 46];
 const QUIZ_SECTION_ASSET_TITLE = "QUIZ";
 const QUIZ_PROMPT_FILE_NAME = "prompt.md";
+const MODULE_ITEM_DEFAULT_INDENT = 1;
 
 function toFilesystemSegment(input: string): string {
   const cleaned = input
@@ -2176,14 +2177,13 @@ async function prepareTaskAAssets(input: {
 
   const createdFiles: string[] = [];
   const notesTemplate = `---
-pageTitle: "${input.taskLabel}: ${NOTE_PLACEHOLDER_TOKEN}"
+pageTitle: "${input.taskLabel}"
 media:
   youtube:
     width: 560
 ---
 
-${NOTE_PLACEHOLDER_TOKEN}
-Replace the placeholder token above and use the sections below as a starter template.
+Use the sections below as a starter template and replace the example content with real task instructions.
 
 ### Learning Goal
 Describe what students are trying to build, test, or explain in ${input.taskLabel}.
@@ -2406,7 +2406,8 @@ async function ensureModulePagePlacement(input: {
     await input.client.createModulePageItem(input.courseId, input.moduleId, {
       title: input.pageTitle,
       pageUrl: input.pageUrl,
-      position: input.insertionPosition
+      position: input.insertionPosition,
+      indent: MODULE_ITEM_DEFAULT_INDENT
     });
     return {
       createdModuleItem: true,
@@ -2414,12 +2415,18 @@ async function ensureModulePagePlacement(input: {
     };
   }
 
-  if (moduleItemForPage.position !== input.insertionPosition) {
+  if (
+    moduleItemForPage.position !== input.insertionPosition ||
+    (moduleItemForPage.indent ?? 0) !== MODULE_ITEM_DEFAULT_INDENT ||
+    normalizeName(moduleItemForPage.title) !== normalizeName(input.pageTitle)
+  ) {
     await input.client.updateModuleItemPosition(
       input.courseId,
       input.moduleId,
       moduleItemForPage.id,
-      input.insertionPosition
+      input.insertionPosition,
+      MODULE_ITEM_DEFAULT_INDENT,
+      input.pageTitle
     );
     return {
       createdModuleItem: false,
@@ -2447,7 +2454,8 @@ async function ensureModuleQuizPlacement(input: {
     await input.client.createModuleQuizItem(input.courseId, input.moduleId, {
       title: input.quizTitle,
       quizId: input.quizId,
-      position: input.insertionPosition
+      position: input.insertionPosition,
+      indent: MODULE_ITEM_DEFAULT_INDENT
     });
     return {
       createdModuleItem: true,
@@ -2455,12 +2463,18 @@ async function ensureModuleQuizPlacement(input: {
     };
   }
 
-  if (moduleItemForQuiz.position !== input.insertionPosition) {
+  if (
+    moduleItemForQuiz.position !== input.insertionPosition ||
+    (moduleItemForQuiz.indent ?? 0) !== MODULE_ITEM_DEFAULT_INDENT ||
+    normalizeName(moduleItemForQuiz.title) !== normalizeName(input.quizTitle)
+  ) {
     await input.client.updateModuleItemPosition(
       input.courseId,
       input.moduleId,
       moduleItemForQuiz.id,
-      input.insertionPosition
+      input.insertionPosition,
+      MODULE_ITEM_DEFAULT_INDENT,
+      input.quizTitle
     );
     return {
       createdModuleItem: false,
@@ -4928,15 +4942,22 @@ program.command("teacher-notes")
         await client.createModulePageItem(courseId, built.module.id, {
           title: pageTitle,
           pageUrl,
-          position: built.insertionPosition
+          position: built.insertionPosition,
+          indent: MODULE_ITEM_DEFAULT_INDENT
         });
         createdModuleItem = true;
-      } else if (moduleItemForPage.position !== built.insertionPosition) {
+      } else if (
+        moduleItemForPage.position !== built.insertionPosition ||
+        (moduleItemForPage.indent ?? 0) !== MODULE_ITEM_DEFAULT_INDENT ||
+        normalize(moduleItemForPage.title) !== normalize(pageTitle)
+      ) {
         await client.updateModuleItemPosition(
           courseId,
           built.module.id,
           moduleItemForPage.id,
-          built.insertionPosition
+          built.insertionPosition,
+          MODULE_ITEM_DEFAULT_INDENT,
+          pageTitle
         );
         movedModuleItem = true;
       }
