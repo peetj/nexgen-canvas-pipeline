@@ -454,7 +454,7 @@ type EnsureModulePagePlacementResult = {
 };
 
 type OrchestratorBlueprint = {
-  schemaVersion: "course-orchestrator.v1";
+  schemaVersion: "course-orchestrator.v1" | "course-orchestrator.v2";
   modules: OrchestratorModuleSpec[];
 };
 
@@ -463,6 +463,19 @@ type OrchestratorModuleSpec = {
   sessionNumber?: number;
   position?: number;
   steps: OrchestratorStep[];
+};
+
+type OrchestratorModuleTemplateSpec = {
+  name: string;
+  position?: number;
+  steps: OrchestratorStep[];
+};
+
+type OrchestratorTemplateSessionSpec = {
+  sessionNumber: number;
+  topic: string;
+  position?: number;
+  variables?: Record<string, string>;
 };
 
 type OrchestratorSessionHeadersStep = {
@@ -2586,6 +2599,167 @@ function optionalPositiveInteger(input: unknown, pathLabel: string): number | un
   return input;
 }
 
+function optionalStringRecord(input: unknown, pathLabel: string): Record<string, string> | undefined {
+  if (input === undefined) return undefined;
+  const record = requireObjectRecord(input, pathLabel);
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value !== "string") {
+      throw new Error(`${pathLabel}.${key} must be a string.`);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function buildOrchestratorInterpolationContext(
+  session: OrchestratorTemplateSessionSpec
+): Record<string, string> {
+  const builtIns: Record<string, string> = {
+    n: String(session.sessionNumber),
+    nn: String(session.sessionNumber).padStart(2, "0"),
+    topic: session.topic,
+    sessionNumber: String(session.sessionNumber)
+  };
+
+  const custom = session.variables ?? {};
+  for (const key of Object.keys(custom)) {
+    if (Object.prototype.hasOwnProperty.call(builtIns, key)) {
+      throw new Error(`sessions.variables cannot override reserved placeholder "${key}".`);
+    }
+  }
+
+  return {
+    ...builtIns,
+    ...custom
+  };
+}
+
+function interpolateTemplateString(
+  input: string,
+  context: Record<string, string>,
+  pathLabel: string
+): string {
+  return input.replace(/\{([A-Za-z0-9_]+)\}/g, (_, key: string) => {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
+      throw new Error(`Missing placeholder value for "${key}" at ${pathLabel}.`);
+    }
+    return context[key];
+  });
+}
+
+function interpolateOrchestratorPageContentBlock(
+  block: OrchestratorPageContentBlock,
+  context: Record<string, string>,
+  pathLabel: string
+): OrchestratorPageContentBlock {
+  switch (block.type) {
+    case "markdown":
+      return {
+        type: block.type,
+        value: interpolateTemplateString(block.value, context, `${pathLabel}.value`)
+      };
+    case "markdownFile":
+      return {
+        type: block.type,
+        path: interpolateTemplateString(block.path, context, `${pathLabel}.path`)
+      };
+    case "html":
+      return {
+        type: block.type,
+        value: interpolateTemplateString(block.value, context, `${pathLabel}.value`)
+      };
+    case "htmlFile":
+      return {
+        type: block.type,
+        path: interpolateTemplateString(block.path, context, `${pathLabel}.path`)
+      };
+    case "imageFile":
+      return {
+        type: block.type,
+        path: interpolateTemplateString(block.path, context, `${pathLabel}.path`),
+        alt: block.alt
+          ? interpolateTemplateString(block.alt, context, `${pathLabel}.alt`)
+          : undefined,
+        filesFolder: interpolateTemplateString(block.filesFolder, context, `${pathLabel}.filesFolder`)
+      };
+  }
+}
+
+function interpolateOrchestratorStep(
+  step: OrchestratorStep,
+  context: Record<string, string>,
+  pathLabel: string
+): OrchestratorStep {
+  switch (step.type) {
+    case "session-headers":
+      return {
+        type: step.type,
+        sessionNumber: step.sessionNumber
+      };
+    case "subheader":
+      return {
+        type: step.type,
+        title: interpolateTemplateString(step.title, context, `${pathLabel}.title`)
+      };
+    case "page":
+      return {
+        type: step.type,
+        title: interpolateTemplateString(step.title, context, `${pathLabel}.title`),
+        publish: step.publish,
+        afterHeaderTitle: step.afterHeaderTitle
+          ? interpolateTemplateString(step.afterHeaderTitle, context, `${pathLabel}.afterHeaderTitle`)
+          : undefined,
+        content: step.content.map((block, index) =>
+          interpolateOrchestratorPageContentBlock(block, context, `${pathLabel}.content[${index}]`)
+        )
+      };
+    case "today-section":
+      return {
+        type: step.type,
+        pageTitle: step.pageTitle
+          ? interpolateTemplateString(step.pageTitle, context, `${pathLabel}.pageTitle`)
+          : undefined,
+        notes: step.notes
+          ? interpolateTemplateString(step.notes, context, `${pathLabel}.notes`)
+          : undefined,
+        notesFile: step.notesFile
+          ? interpolateTemplateString(step.notesFile, context, `${pathLabel}.notesFile`)
+          : undefined,
+        imageUrl: step.imageUrl
+          ? interpolateTemplateString(step.imageUrl, context, `${pathLabel}.imageUrl`)
+          : undefined,
+        imageId: step.imageId,
+        imageFile: step.imageFile
+          ? interpolateTemplateString(step.imageFile, context, `${pathLabel}.imageFile`)
+          : undefined,
+        aiImagePrompt: step.aiImagePrompt
+          ? interpolateTemplateString(step.aiImagePrompt, context, `${pathLabel}.aiImagePrompt`)
+          : undefined,
+        publish: step.publish
+      };
+    case "task-a-section":
+    case "task-b-section":
+    case "task-c-section":
+      return {
+        type: step.type,
+        taskFolder: step.taskFolder
+          ? interpolateTemplateString(step.taskFolder, context, `${pathLabel}.taskFolder`)
+          : undefined,
+        pageTitle: step.pageTitle
+          ? interpolateTemplateString(step.pageTitle, context, `${pathLabel}.pageTitle`)
+          : undefined,
+        notes: step.notes
+          ? interpolateTemplateString(step.notes, context, `${pathLabel}.notes`)
+          : undefined,
+        notesFile: step.notesFile
+          ? interpolateTemplateString(step.notesFile, context, `${pathLabel}.notesFile`)
+          : undefined,
+        publish: step.publish
+      };
+  }
+}
+
 function parseOrchestratorPageContentBlock(input: unknown, pathLabel: string): OrchestratorPageContentBlock {
   const record = requireObjectRecord(input, pathLabel);
   const type = requireNonEmptyString(record.type, `${pathLabel}.type`);
@@ -2679,39 +2853,138 @@ function parseOrchestratorStep(input: unknown, pathLabel: string): OrchestratorS
   }
 }
 
+function parseOrchestratorModuleSpec(input: unknown, pathLabel: string): OrchestratorModuleSpec {
+  const moduleRecord = requireObjectRecord(input, pathLabel);
+  const rawSteps = moduleRecord.steps;
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+    throw new Error(`${pathLabel}.steps must be a non-empty array.`);
+  }
+  return {
+    name: requireNonEmptyString(moduleRecord.name, `${pathLabel}.name`),
+    sessionNumber: optionalPositiveInteger(moduleRecord.sessionNumber, `${pathLabel}.sessionNumber`),
+    position: optionalPositiveInteger(moduleRecord.position, `${pathLabel}.position`),
+    steps: rawSteps.map((stepInput, stepIndex) =>
+      parseOrchestratorStep(stepInput, `${pathLabel}.steps[${stepIndex}]`)
+    )
+  };
+}
+
+function parseOrchestratorModuleTemplateSpec(
+  input: unknown,
+  pathLabel: string
+): OrchestratorModuleTemplateSpec {
+  const templateRecord = requireObjectRecord(input, pathLabel);
+  const rawSteps = templateRecord.steps;
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+    throw new Error(`${pathLabel}.steps must be a non-empty array.`);
+  }
+  return {
+    name: requireNonEmptyString(templateRecord.name, `${pathLabel}.name`),
+    position: optionalPositiveInteger(templateRecord.position, `${pathLabel}.position`),
+    steps: rawSteps.map((stepInput, stepIndex) =>
+      parseOrchestratorStep(stepInput, `${pathLabel}.steps[${stepIndex}]`)
+    )
+  };
+}
+
+function parseOrchestratorTemplateSessionSpec(
+  input: unknown,
+  pathLabel: string
+): OrchestratorTemplateSessionSpec {
+  const sessionRecord = requireObjectRecord(input, pathLabel);
+  const sessionNumber = optionalPositiveInteger(sessionRecord.sessionNumber, `${pathLabel}.sessionNumber`);
+  if (sessionNumber === undefined) {
+    throw new Error(`${pathLabel}.sessionNumber must be a positive integer.`);
+  }
+  return {
+    sessionNumber,
+    topic: requireNonEmptyString(sessionRecord.topic, `${pathLabel}.topic`),
+    position: optionalPositiveInteger(sessionRecord.position, `${pathLabel}.position`),
+    variables: optionalStringRecord(sessionRecord.variables, `${pathLabel}.variables`)
+  };
+}
+
+function expandOrchestratorModuleTemplate(
+  template: OrchestratorModuleTemplateSpec,
+  sessions: OrchestratorTemplateSessionSpec[]
+): OrchestratorModuleSpec[] {
+  return sessions.map((session, index) => {
+    const context = buildOrchestratorInterpolationContext(session);
+    return {
+      name: interpolateTemplateString(template.name, context, `blueprint.moduleTemplate.name`),
+      sessionNumber: session.sessionNumber,
+      position: session.position ?? template.position,
+      steps: template.steps.map((step, stepIndex) =>
+        interpolateOrchestratorStep(
+          step,
+          context,
+          `blueprint.moduleTemplate.steps[${stepIndex}] for sessions[${index}]`
+        )
+      )
+    };
+  });
+}
+
+function assertUniqueOrchestratorModuleNames(modules: OrchestratorModuleSpec[]): void {
+  const seen = new Set<string>();
+  for (const module of modules) {
+    const key = normalizeName(module.name);
+    if (seen.has(key)) {
+      throw new Error(`Duplicate module name in orchestration blueprint: "${module.name}".`);
+    }
+    seen.add(key);
+  }
+}
+
 function parseCourseOrchestratorBlueprint(input: unknown): OrchestratorBlueprint {
   const record = requireObjectRecord(input, "blueprint");
   const schemaVersion = requireNonEmptyString(record.schemaVersion, "blueprint.schemaVersion");
-  if (schemaVersion !== "course-orchestrator.v1") {
+  if (schemaVersion !== "course-orchestrator.v1" && schemaVersion !== "course-orchestrator.v2") {
     throw new Error(`Unsupported blueprint.schemaVersion "${schemaVersion}".`);
   }
-  if (!Array.isArray(record.modules) || record.modules.length === 0) {
-    throw new Error("blueprint.modules must be a non-empty array.");
+
+  const modules: OrchestratorModuleSpec[] = [];
+  if (Array.isArray(record.modules) && record.modules.length > 0) {
+    modules.push(
+      ...record.modules.map((moduleInput, moduleIndex) =>
+        parseOrchestratorModuleSpec(moduleInput, `blueprint.modules[${moduleIndex}]`)
+      )
+    );
   }
 
+  if (schemaVersion === "course-orchestrator.v1") {
+    if (modules.length === 0) {
+      throw new Error("blueprint.modules must be a non-empty array.");
+    }
+    assertUniqueOrchestratorModuleNames(modules);
+    return {
+      schemaVersion: "course-orchestrator.v1",
+      modules
+    };
+  }
+
+  const hasTemplateInput = record.moduleTemplate !== undefined || record.sessions !== undefined;
+  if (hasTemplateInput) {
+    const template = parseOrchestratorModuleTemplateSpec(record.moduleTemplate, "blueprint.moduleTemplate");
+    if (!Array.isArray(record.sessions) || record.sessions.length === 0) {
+      throw new Error("blueprint.sessions must be a non-empty array.");
+    }
+    const sessions = record.sessions.map((sessionInput, sessionIndex) =>
+      parseOrchestratorTemplateSessionSpec(sessionInput, `blueprint.sessions[${sessionIndex}]`)
+    );
+    modules.push(...expandOrchestratorModuleTemplate(template, sessions));
+  }
+
+  if (modules.length === 0) {
+    throw new Error(
+      'course-orchestrator.v2 requires either a non-empty "modules" array or "moduleTemplate" with "sessions".'
+    );
+  }
+
+  assertUniqueOrchestratorModuleNames(modules);
   return {
-    schemaVersion: "course-orchestrator.v1",
-    modules: record.modules.map((moduleInput, moduleIndex) => {
-      const moduleRecord = requireObjectRecord(moduleInput, `blueprint.modules[${moduleIndex}]`);
-      const rawSteps = moduleRecord.steps;
-      if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
-        throw new Error(`blueprint.modules[${moduleIndex}].steps must be a non-empty array.`);
-      }
-      return {
-        name: requireNonEmptyString(moduleRecord.name, `blueprint.modules[${moduleIndex}].name`),
-        sessionNumber: optionalPositiveInteger(
-          moduleRecord.sessionNumber,
-          `blueprint.modules[${moduleIndex}].sessionNumber`
-        ),
-        position: optionalPositiveInteger(
-          moduleRecord.position,
-          `blueprint.modules[${moduleIndex}].position`
-        ),
-        steps: rawSteps.map((stepInput, stepIndex) =>
-          parseOrchestratorStep(stepInput, `blueprint.modules[${moduleIndex}].steps[${stepIndex}]`)
-        )
-      };
-    })
+    schemaVersion: "course-orchestrator.v2",
+    modules
   };
 }
 
@@ -2729,6 +3002,7 @@ async function runCourseOrchestrateWorkflow(input: {
 
   console.log(`Course: ${input.courseId}`);
   console.log(`Blueprint: ${blueprintFilePath}`);
+  console.log(`Schema: ${blueprint.schemaVersion}`);
   console.log(`Modules: ${blueprint.modules.length}`);
   if (input.dryRun) {
     console.log("Mode: dry-run");

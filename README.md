@@ -385,10 +385,13 @@ Options:
 - `--dry-run`: Plan orchestration without Canvas writes.
 
 Blueprint notes:
-- Blueprint schema version is `course-orchestrator.v1`.
-- Top-level shape is `{ "schemaVersion": "...", "modules": [...] }`.
+- Supported schema versions: `course-orchestrator.v1` and `course-orchestrator.v2`.
+- `v1` uses the explicit shape `{ "schemaVersion": "course-orchestrator.v1", "modules": [...] }`.
+- `v2` adds the template shape `{ "schemaVersion": "course-orchestrator.v2", "moduleTemplate": {...}, "sessions": [...] }`.
+- `v2` is the recommended authoring format when you want to generate multiple session modules from one shared structure.
+- Placeholders supported in `v2` string fields include `{n}`, `{nn}`, `{topic}`, and custom values from `sessions[].variables`.
 - Each module entry can create the module if missing, then run ordered workflow steps.
-- Supported step types in v1: `session-headers`, `today-section`, `task-a-section`, `task-b-section`, `task-c-section`, `subheader`, `page`.
+- Supported step types: `session-headers`, `today-section`, `task-a-section`, `task-b-section`, `task-c-section`, `subheader`, `page`.
 - `page` steps use a typed `content` array. Supported content block types: `markdown`, `markdownFile`, `html`, `htmlFile`, `imageFile`.
 - `today-section` and task section steps reuse the same logic as the standalone commands.
 - On a brand-new module, `--dry-run` can fully plan structural steps immediately. Module-aware content previews such as `today-section` may be skipped until the module exists or a live run creates it.

@@ -1,31 +1,40 @@
 {
-  "schemaVersion": "course-orchestrator.v1",
-  "modules": [
+  "schemaVersion": "course-orchestrator.v2",
+  "moduleTemplate": {
+    "name": "Session {nn} - {topic}",
+    "steps": [
+      { "type": "session-headers" },
+      {
+        "type": "today-section",
+        "pageTitle": "Introduction: {topic}",
+        "notes": "Students focus on {topic}, review the session success criteria, and prepare evidence they need to capture during Session {nn}.",
+        "imageUrl": "https://example.com/session-{nn}.jpg"
+      },
+      {
+        "type": "subheader",
+        "title": "Feedback"
+      },
+      {
+        "type": "page",
+        "title": "Session {nn} Feedback",
+        "afterHeaderTitle": "Feedback",
+        "content": [
+          {
+            "type": "markdown",
+            "value": "## Feedback\nStudents reflect on {topic} and document one improvement they will make before the next session."
+          }
+        ]
+      }
+    ]
+  },
+  "sessions": [
     {
-      "name": "Session 01 - Example Build",
       "sessionNumber": 1,
-      "steps": [
-        { "type": "session-headers" },
-        {
-          "type": "today-section",
-          "pageTitle": "Introduction: Example Build",
-          "notes": "Students unpack the course structure, review the build brief, and identify the checkpoints for today's prototype work.",
-          "imageUrl": "https://example.com/example-build.jpg"
-        },
-        { "type": "task-a-section", "taskFolder": "Task A" },
-        { "type": "subheader", "title": "Feedback" },
-        {
-          "type": "page",
-          "title": "Session 01 Feedback",
-          "afterHeaderTitle": "Feedback",
-          "content": [
-            {
-              "type": "markdown",
-              "value": "## Feedback\nStudents record what worked, what failed, and what they will change next lesson."
-            }
-          ]
-        }
-      ]
+      "topic": "Example Build"
+    },
+    {
+      "sessionNumber": 2,
+      "topic": "Prototype Review"
     }
   ]
 }
