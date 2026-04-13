@@ -273,6 +273,7 @@ Options:
 Task A asset skeleton (auto-created if missing):
 - `notes.md` only (single source of truth)
 - `images/` folder (for local image/video assets)
+- New scaffolded `notes.md` files include starter sections for learning goals, materials, steps, a checklist, local image and video examples, a table example, callouts, a helpful link, and an optional `[AGENT]` block.
 
 `notes.md` authoring:
 - Preferred format is Markdown-first with `pageTitle` in frontmatter.
@@ -316,7 +317,7 @@ Generate/update the `Task B` page from local session assets.
 
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
-- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `TaskB`.
+- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `Task B`.
 - `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` `pageTitle` frontmatter value.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
@@ -327,6 +328,7 @@ Options:
 
 Behavior notes:
 - Same Markdown-first / legacy-compatible authoring path as `task-a-section`.
+- The default scaffold includes the same richer starter `notes.md` template used by Task A.
 - Local media uploads target `Session_NN/task_b`.
 
 Example:
@@ -339,7 +341,7 @@ Generate/update the `Task C` page from local session assets.
 
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
-- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `TaskC`.
+- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `Task C`.
 - `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` `pageTitle` frontmatter value.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
@@ -350,6 +352,7 @@ Options:
 
 Behavior notes:
 - Same Markdown-first / legacy-compatible authoring path as `task-a-section`.
+- The default scaffold includes the same richer starter `notes.md` template used by Task A.
 - Local media uploads target `Session_NN/task_c`.
 
 Example:

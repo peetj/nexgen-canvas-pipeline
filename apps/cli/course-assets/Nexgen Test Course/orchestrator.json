@@ -15,6 +15,15 @@
         "skipExisting": true
       },
       {
+        "type": "task-a-section"
+      },
+      {
+        "type": "task-b-section"
+      },
+      {
+        "type": "task-c-section"
+      },
+      {
         "type": "create-survey",
         "fromFile": "shared/weekly-check-in.survey.json",
         "title": "Weekly Check-In-Session {nn}",

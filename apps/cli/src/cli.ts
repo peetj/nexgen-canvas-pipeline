@@ -49,8 +49,8 @@ const ANSWER_READ_ONLY_FIELDS = new Set([
 ]);
 const TODAY_SECTION_ASSET_TITLE = "What we are doing Today";
 const TASK_A_DEFAULT_FOLDER_NAME = "Task A";
-const TASK_B_DEFAULT_FOLDER_NAME = "TaskB";
-const TASK_C_DEFAULT_FOLDER_NAME = "TaskC";
+const TASK_B_DEFAULT_FOLDER_NAME = "Task B";
+const TASK_C_DEFAULT_FOLDER_NAME = "Task C";
 const NOTE_PLACEHOLDER_TOKEN = "[ADD NOTES]";
 const AI_PROMPT_PLACEHOLDER_TOKEN = "[ADD AI IMAGE PROMPT]";
 const IMAGE_URL_PLACEHOLDER_TOKEN = "https://example.com/your-image.jpg";
@@ -558,6 +558,11 @@ type PreparedTodaySectionStepInput = {
   imageId?: number;
   imageFilePath?: string;
   aiImagePrompt?: string;
+};
+
+type PreparedTaskSectionStepInput = {
+  notesText?: string;
+  notesFilePath?: string;
 };
 
 type PreparedCreateQuizStepInput = {
@@ -1532,7 +1537,10 @@ async function resolveTaskFolderName(
   const directories = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-    .filter((name) => normalizeLooseKey(name) !== normalizeLooseKey(TODAY_SECTION_ASSET_TITLE));
+    .filter((name) => {
+      const key = normalizeLooseKey(name);
+      return key !== normalizeLooseKey(TODAY_SECTION_ASSET_TITLE) && key !== normalizeLooseKey(QUIZ_SECTION_ASSET_TITLE);
+    });
 
   if (directories.length === 0) return defaultFolderName;
 
@@ -1545,7 +1553,14 @@ async function resolveTaskFolderName(
   });
   if (taskCandidate) return taskCandidate;
 
-  if (directories.length === 1) return directories[0];
+  if (directories.length === 1) {
+    const onlyKey = normalizeLooseKey(directories[0]);
+    const onlyCompact = onlyKey.replace(/\s+/g, "");
+    const isAnotherStandardTask = /^task [abc](?:\s|$)/.test(onlyKey) || /^task[abc](?:\b|$)/.test(onlyCompact);
+    if (!isAnotherStandardTask) {
+      return directories[0];
+    }
+  }
   return defaultFolderName;
 }
 
@@ -2144,6 +2159,7 @@ async function prepareTaskAAssets(input: {
   assetsRoot: string;
   sessionName: string;
   taskFolderName: string;
+  taskLabel: string;
   notesText?: string;
   notesFilePath?: string;
 }): Promise<TaskAAssets> {
@@ -2160,22 +2176,69 @@ async function prepareTaskAAssets(input: {
 
   const createdFiles: string[] = [];
   const notesTemplate = `---
-pageTitle: ${NOTE_PLACEHOLDER_TOKEN}
+pageTitle: "${input.taskLabel}: ${NOTE_PLACEHOLDER_TOKEN}"
 media:
   youtube:
     width: 560
 ---
 
-Write student-facing content directly in this file using Markdown.
+${NOTE_PLACEHOLDER_TOKEN}
+Replace the placeholder token above and use the sections below as a starter template.
 
-Examples:
-![Alt text](images/example.jpg)
+### Learning Goal
+Describe what students are trying to build, test, or explain in ${input.taskLabel}.
 
-:::note
-Note text
-:::
+### Materials
+- [ADD MATERIAL]
+- [ADD MATERIAL]
+- [ADD MATERIAL]
+
+### Steps
+1. [ADD STEP]
+2. [ADD STEP]
+3. [ADD STEP]
+
+### Success Checklist
+- [ ] I completed the core task.
+- [ ] I tested my work safely.
+- [ ] I can explain one thing I changed or learned.
+
+### Example Local Image
+Store local images in the \`images/\` folder and reference them like this:
+
+![Example task image](images/example.jpg)
+
+### Example Video
+Paste a YouTube, Vimeo, or direct video link on its own line:
 
 https://youtu.be/your-video-id
+
+### Example Table
+[TABLE]
+| Item | Purpose | Status |
+| --- | --- | --- |
+| Example component | What it is used for | Ready |
+| Example tool | How it helps | Needed |
+[/TABLE]
+
+### Example Callouts
+[NOTE]Helpful context, teacher tips, or reminders can go here.[/NOTE]
+
+[INFO]Background information or a concept explanation can go here.[/INFO]
+
+[WARNING]Safety advice, fragile-step warnings, or equipment cautions can go here.[/WARNING]
+
+[QUESTION]Reflection prompts or peer discussion questions can go here.[/QUESTION]
+
+[SUCCESS]Describe what a successful result looks like here.[/SUCCESS]
+
+### Helpful Link
+[Add a supporting resource](https://example.com)
+
+### Optional Agent Brief
+[AGENT]
+Describe any extra structure, accessibility requirements, or enrichment you want the cloud agent to consider.
+[/AGENT]
 `;
   if (await ensureFileWithTemplate(notesPath, notesTemplate)) createdFiles.push(notesPath);
 
@@ -2541,6 +2604,7 @@ async function runTaskSectionWorkflow(input: {
     assetsRoot: input.assetsRoot,
     sessionName: input.sessionName,
     taskFolderName,
+    taskLabel: taskConfig.sectionLabel,
     notesText: input.notesText,
     notesFilePath: input.notesFilePath
   });
@@ -3096,6 +3160,23 @@ async function buildPreparedTodaySectionStepInput(
     imageId: step.imageId,
     imageFilePath: step.imageFile,
     aiImagePrompt: step.aiImagePrompt
+  };
+}
+
+async function buildPreparedTaskSectionStepInput(
+  step: OrchestratorTaskSectionStep,
+  assetsRoot: string,
+  blueprintDir: string
+): Promise<PreparedTaskSectionStepInput> {
+  return {
+    notesText: step.notes,
+    notesFilePath: step.notesFile
+      ? await resolveOrchestratorContentPath({
+          filePath: step.notesFile,
+          assetsRoot,
+          blueprintDir
+        })
+      : undefined
   };
 }
 
@@ -4228,6 +4309,38 @@ async function runCourseOrchestrateWorkflow(input: {
             });
             break;
           }
+          case "task-a-section":
+          case "task-b-section":
+          case "task-c-section": {
+            const taskLetter = step.type === "task-a-section" ? "A" : step.type === "task-b-section" ? "B" : "C";
+            const taskLabel = `Task ${taskLetter}`;
+            const taskFolderName = await resolveTaskFolderName(
+              input.assetsRoot,
+              moduleSpec.name,
+              taskLetter,
+              taskLetter === "A"
+                ? TASK_A_DEFAULT_FOLDER_NAME
+                : taskLetter === "B"
+                  ? TASK_B_DEFAULT_FOLDER_NAME
+                  : TASK_C_DEFAULT_FOLDER_NAME,
+              step.taskFolder
+            );
+            const prepared = await buildPreparedTaskSectionStepInput(step, input.assetsRoot, blueprintDir);
+            const assets = await prepareTaskAAssets({
+              assetsRoot: input.assetsRoot,
+              sessionName: moduleSpec.name,
+              taskFolderName,
+              taskLabel,
+              notesText: prepared.notesText,
+              notesFilePath: prepared.notesFilePath
+            });
+            console.log(`Task assets: ${assets.folderPath}`);
+            console.log(assets.createdFiles.length > 0 ? `Created: ${assets.createdFiles.join(", ")}` : "Local task templates already present.");
+            console.log(
+              `Notes source: ${prepared.notesText ? "inline notes" : prepared.notesFilePath ? prepared.notesFilePath : assets.notesText ? "existing notes.md" : "placeholder"}`
+            );
+            break;
+          }
           case "create-survey": {
             const surveyFilePath = await resolveOrchestratorContentPath({
               filePath: step.fromFile,
@@ -4446,26 +4559,23 @@ async function runCourseOrchestrateWorkflow(input: {
         case "task-a-section":
         case "task-b-section":
         case "task-c-section":
+          {
+          const prepared = await buildPreparedTaskSectionStepInput(step, input.assetsRoot, blueprintDir);
           await runTaskSectionWorkflow({
             courseId: input.courseId,
             sessionName: moduleSpec.name,
             taskLetter: step.type === "task-a-section" ? "A" : step.type === "task-b-section" ? "B" : "C",
             taskFolder: step.taskFolder,
             pageTitle: step.pageTitle,
-            notesText: step.notes,
-            notesFilePath: step.notesFile
-              ? await resolveOrchestratorContentPath({
-                  filePath: step.notesFile,
-                  assetsRoot: input.assetsRoot,
-                  blueprintDir
-                })
-              : undefined,
+            notesText: prepared.notesText,
+            notesFilePath: prepared.notesFilePath,
             publish: step.publish ?? input.publish,
             assetsRoot: input.assetsRoot,
             dryRun: input.dryRun,
             client
           });
           break;
+          }
         case "clone-survey":
           await runModuleCloneSurveyWorkflow({
             courseId: input.courseId,
