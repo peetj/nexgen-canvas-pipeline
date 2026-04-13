@@ -13,8 +13,7 @@
       },
       {
         "type": "today-section",
-        "pageTitle": "Introduction: {topic}",
-        "publish": false
+        "pageTitle": "Introduction: {topic}"
       }
     ]
   },

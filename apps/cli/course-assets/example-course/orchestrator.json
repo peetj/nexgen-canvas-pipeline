@@ -14,7 +14,6 @@
       {
         "type": "today-section",
         "pageTitle": "Introduction: {topic}",
-        "notesFile": "pages/session-{nn}-introduction.md",
         "imageUrl": "https://example.com/session-{nn}.jpg"
       },
       {

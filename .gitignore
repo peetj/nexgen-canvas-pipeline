@@ -4,3 +4,11 @@ dist
 .DS_Store
 apps/cli/session-assets/*
 !apps/cli/session-assets/.gitkeep
+!apps/cli/session-assets/README.md
+!apps/cli/session-assets/*/
+apps/cli/session-assets/*/*
+!apps/cli/session-assets/*/README.md
+!apps/cli/session-assets/*/shared/
+!apps/cli/session-assets/*/shared/**
+!apps/cli/session-assets/*/pages/
+!apps/cli/session-assets/*/pages/**

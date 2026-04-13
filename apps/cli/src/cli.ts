@@ -549,6 +549,15 @@ type OrchestratorBlueprint = {
   modules: OrchestratorModuleSpec[];
 };
 
+type PreparedTodaySectionStepInput = {
+  notesText?: string;
+  notesFilePath?: string;
+  imageUrl?: string;
+  imageId?: number;
+  imageFilePath?: string;
+  aiImagePrompt?: string;
+};
+
 type OrchestratorModuleSpec = {
   name: string;
   sessionNumber?: number;
@@ -662,6 +671,51 @@ function toFilesystemSegment(input: string): string {
   return cleaned;
 }
 
+function deriveCourseScopedSessionAssetsRoot(blueprintFilePath: string): string {
+  const courseFolderName = toFilesystemSegment(path.basename(path.dirname(path.resolve(blueprintFilePath))));
+  return path.resolve(process.cwd(), "apps", "cli", "session-assets", courseFolderName);
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (err) {
+    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+async function resolveOrchestratorContentPath(input: {
+  filePath: string;
+  assetsRoot: string;
+  blueprintDir: string;
+}): Promise<string> {
+  const rawPath = input.filePath.trim();
+  if (rawPath.length === 0) {
+    throw new Error("Encountered an empty orchestrator content path.");
+  }
+
+  const candidates = path.isAbsolute(rawPath)
+    ? [path.resolve(rawPath)]
+    : [path.resolve(input.assetsRoot, rawPath), path.resolve(input.blueprintDir, rawPath)];
+
+  for (const candidate of candidates) {
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (path.isAbsolute(rawPath)) {
+    throw new Error(`Could not find orchestrator content file "${rawPath}".`);
+  }
+
+  throw new Error(
+    `Could not resolve orchestrator content path "${input.filePath}" in "${input.assetsRoot}" or "${input.blueprintDir}".`
+  );
+}
+
 function parseSessionMetadata(sessionName: string): SessionMetadata {
   const trimmed = sessionName.replace(/\s+/g, " ").trim();
   const match = trimmed.match(/^Session\s*(\d+)\s*-\s*(.+)$/i);
@@ -720,6 +774,55 @@ function normalizeNotesText(input: string | undefined): string | undefined {
   if (!normalized) return undefined;
   if (normalized.toLowerCase().includes(NOTE_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
   return normalized;
+}
+
+function parseTodaySectionFrontmatter(raw: string): {
+  body: string;
+  pageTitle?: string;
+  imageUrl?: string;
+  aiImagePrompt?: string;
+} {
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const match = normalized.match(/^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
+  if (!match) {
+    return { body: normalized };
+  }
+
+  const frontmatterText = match[1];
+  const body = normalized.slice(match[0].length).replace(/^\n+/, "");
+  let pageTitle: string | undefined;
+  let imageUrl: string | undefined;
+  let aiImagePrompt: string | undefined;
+
+  for (const rawLine of frontmatterText.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const keyValueMatch = line.match(/^([A-Za-z0-9_]+):(?:\s*(.*))?$/);
+    if (!keyValueMatch) continue;
+
+    const key = keyValueMatch[1];
+    const value = stripMatchingQuotes((keyValueMatch[2] ?? "").trim());
+
+    if (key === "pageTitle" && value) {
+      pageTitle = value;
+      continue;
+    }
+    if (key === "imageUrl" && value) {
+      imageUrl = value;
+      continue;
+    }
+    if (key === "aiImagePrompt" && value) {
+      aiImagePrompt = value;
+    }
+  }
+
+  return {
+    body,
+    pageTitle,
+    imageUrl,
+    aiImagePrompt
+  };
 }
 
 function normalizeSingleLineInput(input: string | undefined): string | undefined {
@@ -1119,15 +1222,20 @@ Write one or two short paragraphs that explain what students are doing in this s
   if (await ensureFileWithTemplate(imageUrlPath, imageTemplate)) createdFiles.push(imageUrlPath);
   if (await ensureFileWithTemplate(aiPromptPath, aiPromptTemplate)) createdFiles.push(aiPromptPath);
 
-  let notesText = normalizeNotesText(input.notesText);
-  if (!notesText && input.notesFilePath) {
-    const loaded = await fs.readFile(path.resolve(input.notesFilePath), "utf8");
-    notesText = normalizeNotesText(loaded);
+  let authoredNotesTextFromInput: string | undefined;
+  if (input.notesText) {
+    authoredNotesTextFromInput = input.notesText.replace(/\r\n/g, "\n").trim();
+  } else if (input.notesFilePath) {
+    authoredNotesTextFromInput = await fs.readFile(path.resolve(input.notesFilePath), "utf8");
   }
-  if (!notesText) {
-    notesText = normalizeNotesText(await readTextIfExists(notesPath));
-  } else {
-    await fs.writeFile(notesPath, `${notesText}\n`, "utf8");
+
+  const authoredNotesText = authoredNotesTextFromInput ?? (await readTextIfExists(notesPath));
+  const parsedNotes = authoredNotesText ? parseTodaySectionFrontmatter(authoredNotesText) : { body: "" };
+  const notesText = normalizeNotesText(parsedNotes.body);
+
+  if (authoredNotesTextFromInput !== undefined) {
+    const normalizedForWrite = authoredNotesTextFromInput.trimEnd();
+    await fs.writeFile(notesPath, `${normalizedForWrite}\n`, "utf8");
   }
 
   let imageUrl: string | undefined;
@@ -1157,9 +1265,18 @@ Write one or two short paragraphs that explain what students are doing in this s
     localImagePath = await findLocalImageFile(folderPath, input.imageFilePath);
     imageUrl = normalizeSingleLineInput(input.imageUrl);
     if (!imageUrl) {
-      imageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
+      imageUrl =
+        normalizeSingleLineInput(parsedNotes.imageUrl) ??
+        normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
     } else {
       await fs.writeFile(imageUrlPath, `${imageUrl}\n`, "utf8");
+    }
+
+    if (!input.imageUrl && parsedNotes.imageUrl) {
+      const normalizedImageUrl = normalizeSingleLineInput(parsedNotes.imageUrl);
+      if (normalizedImageUrl) {
+        await fs.writeFile(imageUrlPath, `${normalizedImageUrl}\n`, "utf8");
+      }
     }
 
     if (localImagePath) {
@@ -1183,9 +1300,18 @@ Write one or two short paragraphs that explain what students are doing in this s
 
   let aiImagePrompt = normalizeSingleLineInput(input.aiImagePrompt);
   if (!aiImagePrompt) {
-    aiImagePrompt = normalizeSingleLineInput(await readTextIfExists(aiPromptPath));
+    aiImagePrompt =
+      normalizeSingleLineInput(parsedNotes.aiImagePrompt) ??
+      normalizeSingleLineInput(await readTextIfExists(aiPromptPath));
   } else {
     await fs.writeFile(aiPromptPath, `${aiImagePrompt}\n`, "utf8");
+  }
+
+  if (!input.aiImagePrompt && parsedNotes.aiImagePrompt) {
+    const normalizedAiPrompt = normalizeSingleLineInput(parsedNotes.aiImagePrompt);
+    if (normalizedAiPrompt) {
+      await fs.writeFile(aiPromptPath, `${normalizedAiPrompt}\n`, "utf8");
+    }
   }
 
   return {
@@ -2562,6 +2688,44 @@ async function runTodaySectionWorkflow(input: {
   console.log(`Page URL: ${env.canvasBaseUrl}/courses/${input.courseId}/pages/${pageResult.pageUrl}`);
 }
 
+async function prepareTodaySectionStepAssets(input: {
+  sessionName: string;
+  assetsRoot: string;
+  notesText?: string;
+  notesFilePath?: string;
+  imageUrl?: string;
+  imageId?: number;
+  imageFilePath?: string;
+  aiImagePrompt?: string;
+  client?: CanvasClient;
+}): Promise<void> {
+  const assets = await prepareTodaySectionAssets({
+    assetsRoot: input.assetsRoot,
+    sessionName: input.sessionName,
+    sectionTitle: TODAY_SECTION_ASSET_TITLE,
+    notesText: input.notesText,
+    notesFilePath: input.notesFilePath,
+    imageUrl: input.imageUrl,
+    imageId: input.imageId,
+    imageFilePath: input.imageFilePath,
+    aiImagePrompt: input.aiImagePrompt,
+    client: input.client
+  });
+
+  console.log(`Session assets: ${assets.folderPath}`);
+  if (assets.createdFiles.length > 0) {
+    console.log("Created local asset templates:");
+    for (const createdPath of assets.createdFiles) {
+      console.log(`- ${createdPath}`);
+    }
+  } else {
+    console.log("Local asset templates already present.");
+  }
+  console.log(`Notes source: ${assets.notesText ? "ready" : "placeholder"}`);
+  console.log(`Image source: ${assets.imageSource}`);
+  console.log(`AI image prompt: ${assets.aiImagePrompt ? "ready" : "placeholder"}`);
+}
+
 async function runModuleSubHeaderWorkflow(input: {
   courseId: number;
   moduleName: string;
@@ -2611,7 +2775,8 @@ function resolveModulePageInsertionPosition(
 async function renderOrchestratorPageHtml(input: {
   courseId: number;
   blocks: OrchestratorPageContentBlock[];
-  baseDir: string;
+  assetsRoot: string;
+  blueprintDir: string;
   dryRun: boolean;
 }): Promise<{ html: string; uploadedImages: Array<{ source: string; uploadedUrl: string; id: number }> }> {
   const lines: string[] = [];
@@ -2623,7 +2788,11 @@ async function renderOrchestratorPageHtml(input: {
       continue;
     }
     if (block.type === "markdownFile") {
-      const markdownPath = path.resolve(input.baseDir, block.path);
+      const markdownPath = await resolveOrchestratorContentPath({
+        filePath: block.path,
+        assetsRoot: input.assetsRoot,
+        blueprintDir: input.blueprintDir
+      });
       const markdownText = await fs.readFile(markdownPath, "utf8");
       lines.push(String(await marked.parse(markdownText)));
       continue;
@@ -2633,12 +2802,20 @@ async function renderOrchestratorPageHtml(input: {
       continue;
     }
     if (block.type === "htmlFile") {
-      const htmlPath = path.resolve(input.baseDir, block.path);
+      const htmlPath = await resolveOrchestratorContentPath({
+        filePath: block.path,
+        assetsRoot: input.assetsRoot,
+        blueprintDir: input.blueprintDir
+      });
       lines.push(await fs.readFile(htmlPath, "utf8"));
       continue;
     }
 
-    const imagePath = path.resolve(input.baseDir, block.path);
+    const imagePath = await resolveOrchestratorContentPath({
+      filePath: block.path,
+      assetsRoot: input.assetsRoot,
+      blueprintDir: input.blueprintDir
+    });
     const converted = await imageFileToDataUrl(imagePath);
     let imageUrl = converted.dataUrl;
     if (!input.dryRun) {
@@ -2677,7 +2854,8 @@ async function runModulePageWorkflow(input: {
   publish: boolean;
   afterHeaderTitle?: string;
   content: OrchestratorPageContentBlock[];
-  baseDir: string;
+  assetsRoot: string;
+  blueprintDir: string;
   dryRun: boolean;
   client?: CanvasClient;
 }): Promise<void> {
@@ -2688,7 +2866,8 @@ async function runModulePageWorkflow(input: {
   const rendered = await renderOrchestratorPageHtml({
     courseId: input.courseId,
     blocks: input.content,
-    baseDir: input.baseDir,
+    assetsRoot: input.assetsRoot,
+    blueprintDir: input.blueprintDir,
     dryRun: input.dryRun
   });
 
@@ -2731,6 +2910,27 @@ async function runModulePageWorkflow(input: {
     console.log("Module item placement already correct.");
   }
   console.log(`Page URL: ${env.canvasBaseUrl}/courses/${input.courseId}/pages/${pageResult.pageUrl}`);
+}
+
+async function buildPreparedTodaySectionStepInput(
+  step: OrchestratorTodaySectionStep,
+  assetsRoot: string,
+  blueprintDir: string
+): Promise<PreparedTodaySectionStepInput> {
+  return {
+    notesText: step.notes,
+    notesFilePath: step.notesFile
+      ? await resolveOrchestratorContentPath({
+          filePath: step.notesFile,
+          assetsRoot,
+          blueprintDir
+        })
+      : undefined,
+    imageUrl: step.imageUrl,
+    imageId: step.imageId,
+    imageFilePath: step.imageFile,
+    aiImagePrompt: step.aiImagePrompt
+  };
 }
 
 async function runCloneSurveyBatchWorkflow(input: {
@@ -3516,6 +3716,8 @@ async function runCourseOrchestrateWorkflow(input: {
   courseId: number;
   blueprintFilePath: string;
   assetsRoot: string;
+  publish: boolean;
+  prepareAssets: boolean;
   dryRun: boolean;
 }): Promise<void> {
   const blueprintFilePath = path.resolve(input.blueprintFilePath);
@@ -3526,15 +3728,67 @@ async function runCourseOrchestrateWorkflow(input: {
 
   console.log(`Course: ${input.courseId}`);
   console.log(`Blueprint: ${blueprintFilePath}`);
+  console.log(`Session assets root: ${input.assetsRoot}`);
   console.log(`Schema: ${blueprint.schemaVersion}`);
   console.log(`Modules: ${blueprint.modules.length}`);
-  if (input.dryRun) {
+  if (input.prepareAssets) {
+    console.log("Mode: prepare-assets");
+  } else if (input.dryRun) {
     console.log("Mode: dry-run");
   }
 
   for (const moduleSpec of blueprint.modules) {
     console.log("");
     console.log(`== Module: ${moduleSpec.name}`);
+
+    if (input.prepareAssets) {
+      for (const step of moduleSpec.steps) {
+        console.log(`-- Step: ${step.type}`);
+        switch (step.type) {
+          case "today-section": {
+            const prepared = await buildPreparedTodaySectionStepInput(step, input.assetsRoot, blueprintDir);
+            await prepareTodaySectionStepAssets({
+              sessionName: moduleSpec.name,
+              assetsRoot: input.assetsRoot,
+              notesText: prepared.notesText,
+              notesFilePath: prepared.notesFilePath,
+              imageUrl: prepared.imageUrl,
+              imageId: prepared.imageId,
+              imageFilePath: prepared.imageFilePath,
+              aiImagePrompt: prepared.aiImagePrompt,
+              client
+            });
+            break;
+          }
+          case "create-survey": {
+            const surveyFilePath = await resolveOrchestratorContentPath({
+              filePath: step.fromFile,
+              assetsRoot: input.assetsRoot,
+              blueprintDir
+            });
+            const survey = await loadSurveyFromFile(surveyFilePath);
+            console.log(`Survey JSON ok: ${surveyFilePath} (${survey.questions.length} question(s))`);
+            break;
+          }
+          case "page": {
+            const rendered = await renderOrchestratorPageHtml({
+              courseId: input.courseId,
+              blocks: step.content,
+              assetsRoot: input.assetsRoot,
+              blueprintDir,
+              dryRun: true
+            });
+            console.log(`Page content validated: ${step.title}`);
+            console.log(rendered.html.split("\n").slice(0, 6).join("\n"));
+            break;
+          }
+          default:
+            console.log("No local asset preparation required for this step.");
+            break;
+        }
+      }
+      continue;
+    }
 
     const existingModule = await findExactModuleByNameIfExists(client, input.courseId, moduleSpec.name);
     let moduleRef: CanvasModuleSummary | undefined = existingModule;
@@ -3585,7 +3839,8 @@ async function runCourseOrchestrateWorkflow(input: {
           const rendered = await renderOrchestratorPageHtml({
             courseId: input.courseId,
             blocks: step.content,
-            baseDir: blueprintDir,
+            assetsRoot: input.assetsRoot,
+            blueprintDir,
             dryRun: true
           });
           console.log(`Dry run: would create/update page "${step.title}" after module creation.`);
@@ -3615,7 +3870,11 @@ async function runCourseOrchestrateWorkflow(input: {
         }
 
         if (step.type === "create-survey") {
-          const surveyFilePath = path.resolve(blueprintDir, step.fromFile);
+          const surveyFilePath = await resolveOrchestratorContentPath({
+            filePath: step.fromFile,
+            assetsRoot: input.assetsRoot,
+            blueprintDir
+          });
           const survey = await loadSurveyFromFile(surveyFilePath);
           const effectiveTitle = step.title ?? survey.title;
           const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
@@ -3663,31 +3922,35 @@ async function runCourseOrchestrateWorkflow(input: {
             courseId: input.courseId,
             moduleName: moduleSpec.name,
             title: step.title,
-            publish: Boolean(step.publish),
+            publish: step.publish ?? input.publish,
             afterHeaderTitle: step.afterHeaderTitle,
             content: step.content,
-            baseDir: blueprintDir,
+            assetsRoot: input.assetsRoot,
+            blueprintDir,
             dryRun: input.dryRun,
             client
           });
           break;
         case "today-section":
+          {
+          const prepared = await buildPreparedTodaySectionStepInput(step, input.assetsRoot, blueprintDir);
           await runTodaySectionWorkflow({
             courseId: input.courseId,
             sessionName: moduleSpec.name,
             pageTitle: step.pageTitle,
-            notesText: step.notes,
-            notesFilePath: step.notesFile ? path.resolve(blueprintDir, step.notesFile) : undefined,
-            imageUrl: step.imageUrl,
-            imageId: step.imageId,
-            imageFilePath: step.imageFile,
-            aiImagePrompt: step.aiImagePrompt,
-            publish: Boolean(step.publish),
+            notesText: prepared.notesText,
+            notesFilePath: prepared.notesFilePath,
+            imageUrl: prepared.imageUrl,
+            imageId: prepared.imageId,
+            imageFilePath: prepared.imageFilePath,
+            aiImagePrompt: prepared.aiImagePrompt,
+            publish: step.publish ?? input.publish,
             assetsRoot: input.assetsRoot,
             dryRun: input.dryRun,
             client
           });
           break;
+          }
         case "task-a-section":
         case "task-b-section":
         case "task-c-section":
@@ -3698,8 +3961,14 @@ async function runCourseOrchestrateWorkflow(input: {
             taskFolder: step.taskFolder,
             pageTitle: step.pageTitle,
             notesText: step.notes,
-            notesFilePath: step.notesFile ? path.resolve(blueprintDir, step.notesFile) : undefined,
-            publish: Boolean(step.publish),
+            notesFilePath: step.notesFile
+              ? await resolveOrchestratorContentPath({
+                  filePath: step.notesFile,
+                  assetsRoot: input.assetsRoot,
+                  blueprintDir
+                })
+              : undefined,
+            publish: step.publish ?? input.publish,
             assetsRoot: input.assetsRoot,
             dryRun: input.dryRun,
             client
@@ -3721,9 +3990,13 @@ async function runCourseOrchestrateWorkflow(input: {
         case "create-survey":
           await runCreateSurveyWorkflow({
             courseId: input.courseId,
-            surveyFilePath: path.resolve(blueprintDir, step.fromFile),
+            surveyFilePath: await resolveOrchestratorContentPath({
+              filePath: step.fromFile,
+              assetsRoot: input.assetsRoot,
+              blueprintDir
+            }),
             title: step.title,
-            publish: Boolean(step.publish),
+            publish: step.publish ?? input.publish,
             skipExisting: step.skipExisting ?? true,
             moduleName: moduleSpec.name,
             afterHeaderTitle: step.afterHeaderTitle,
@@ -4261,20 +4534,30 @@ program.command("course-orchestrate")
   )
   .option(
     "--assets-root <path>",
-    "Local root for section assets used by session workflows",
-    path.resolve(process.cwd(), "apps", "cli", "session-assets")
+    "Optional local root for section assets used by session workflows. If omitted, course-orchestrate uses apps/cli/session-assets/<course-name>."
   )
+  .option("--prepare-assets", "Create/check local session asset files without Canvas writes", false)
+  .option("--publish", "Publish supported content when a step does not set publish explicitly", false)
   .option("--dry-run", "Plan orchestration without making Canvas writes", false)
   .action(async (opts) => {
     const courseId = Number(opts.courseId);
     if (!Number.isFinite(courseId) || courseId <= 0) {
       throw new Error("Invalid --course-id. Provide a positive numeric Canvas course id.");
     }
+    if (opts.prepareAssets && opts.dryRun) {
+      throw new Error("Use either --prepare-assets or --dry-run, not both.");
+    }
+    const blueprintFilePath = String(opts.fromFile);
+    const assetsRoot = opts.assetsRoot
+      ? path.resolve(String(opts.assetsRoot))
+      : deriveCourseScopedSessionAssetsRoot(blueprintFilePath);
 
     await runCourseOrchestrateWorkflow({
       courseId,
-      blueprintFilePath: String(opts.fromFile),
-      assetsRoot: path.resolve(String(opts.assetsRoot)),
+      blueprintFilePath,
+      assetsRoot,
+      publish: Boolean(opts.publish),
+      prepareAssets: Boolean(opts.prepareAssets),
       dryRun: Boolean(opts.dryRun)
     });
   });

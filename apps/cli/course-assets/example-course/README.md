@@ -1,6 +1,6 @@
 # Example Course
 
-This folder shows the recommended course-level layout for orchestration work.
+This folder shows the recommended course-level orchestration layout.
 
 Run the example with:
 
@@ -10,5 +10,7 @@ npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/c
 
 Folder notes:
 - `orchestrator.json` defines the module template and per-session expansion.
-- `pages/` contains page fragments and markdown files referenced from the blueprint.
-- `shared/` is for course-wide reusable assets such as survey JSON files, shared images, or HTML snippets.
+- Authored content for this example lives under `apps/cli/session-assets/example-course/`.
+- `apps/cli/session-assets/example-course/pages/` contains page fragments and markdown files referenced from the blueprint, such as the feedback page content.
+- `apps/cli/session-assets/example-course/shared/` contains reusable course assets such as survey JSON files.
+- `today-section` content is expected under `apps/cli/session-assets/example-course/<session-name>/What we are doing Today/notes.md`; use `--prepare-assets` to scaffold those files.
