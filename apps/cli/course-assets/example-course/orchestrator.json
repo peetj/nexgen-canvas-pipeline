@@ -5,9 +5,16 @@
     "steps": [
       { "type": "session-headers" },
       {
+        "type": "create-survey",
+        "fromFile": "shared/weekly-check-in.survey.json",
+        "title": "Weekly Check-In-Session {nn}",
+        "afterHeaderTitle": "Weekly Check-In",
+        "skipExisting": true
+      },
+      {
         "type": "today-section",
         "pageTitle": "Introduction: {topic}",
-        "notes": "Students focus on {topic}, review the session success criteria, and prepare evidence they need to capture during Session {nn}.",
+        "notesFile": "pages/session-{nn}-introduction.md",
         "imageUrl": "https://example.com/session-{nn}.jpg"
       },
       {
@@ -20,8 +27,8 @@
         "afterHeaderTitle": "Feedback",
         "content": [
           {
-            "type": "markdown",
-            "value": "## Feedback\nStudents reflect on {topic} and document one improvement they will make before the next session."
+            "type": "markdownFile",
+            "path": "pages/session-{nn}-feedback.md"
           }
         ]
       }

@@ -21,6 +21,7 @@ export type CanvasModuleItem = {
   title: string;
   type: string;
   position: number;
+  content_id?: number | null;
   page_url?: string | null;
 };
 
@@ -404,6 +405,25 @@ export class CanvasClient {
           type: "Page",
           title: input.title,
           page_url: input.pageUrl,
+          position: input.position
+        }
+      }
+    });
+  }
+
+  async createModuleQuizItem(
+    courseId: number,
+    moduleId: number,
+    input: { title?: string; quizId: number; position?: number }
+  ): Promise<{ id: number; title: string; position: number; content_id?: number }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/courses/${courseId}/modules/${moduleId}/items`,
+      body: {
+        module_item: {
+          type: "Quiz",
+          title: input.title,
+          content_id: input.quizId,
           position: input.position
         }
       }

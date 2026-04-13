@@ -5,9 +5,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { env } from "./env.js";
 import { validateNexgenQuiz } from "./quiz/schema/validate.js";
+import { validateNexgenSurvey } from "./survey/schema/validate.js";
 import { CanvasClient } from "./canvas/canvasClient.js";
 import type { CanvasFolder, CanvasModuleItem, CanvasModuleSummary } from "./canvas/canvasClient.js";
 import { mapToCanvasQuiz } from "./quiz/quizMapper.js";
+import { mapToCanvasSurvey } from "./survey/surveyMapper.js";
 import { generateQuizFromAgent } from "./agent/quiz/quizAgentClient.js";
 import type { QuizDifficulty } from "./agent/quiz/quizAgentClient.js";
 import { generateTodayIntroFromAgent } from "./agent/sessionIntro/todayIntroAgentClient.js";
@@ -329,7 +331,11 @@ function sanitizeQuestionForCreate(raw: unknown): Record<string, unknown> {
 
 function buildQuizCloneInput(
   sourceQuiz: Record<string, unknown>,
-  title: string
+  title: string,
+  options?: {
+    preserveAssignmentGroup?: boolean;
+    preserveAvailabilityDates?: boolean;
+  }
 ): {
   title: string;
   description?: string;
@@ -351,6 +357,8 @@ function buildQuizCloneInput(
   lock_questions_after_answering?: boolean;
   hide_results?: string;
 } {
+  const preserveAssignmentGroup = options?.preserveAssignmentGroup ?? true;
+  const preserveAvailabilityDates = options?.preserveAvailabilityDates ?? true;
   return {
     title,
     description: typeof sourceQuiz.description === "string" ? sourceQuiz.description : undefined,
@@ -359,7 +367,9 @@ function buildQuizCloneInput(
     time_limit: typeof sourceQuiz.time_limit === "number" ? sourceQuiz.time_limit : undefined,
     allowed_attempts: typeof sourceQuiz.allowed_attempts === "number" ? sourceQuiz.allowed_attempts : undefined,
     assignment_group_id:
-      typeof sourceQuiz.assignment_group_id === "number" ? sourceQuiz.assignment_group_id : undefined,
+      preserveAssignmentGroup && typeof sourceQuiz.assignment_group_id === "number"
+        ? sourceQuiz.assignment_group_id
+        : undefined,
     shuffle_answers: typeof sourceQuiz.shuffle_answers === "boolean" ? sourceQuiz.shuffle_answers : undefined,
     show_correct_answers:
       typeof sourceQuiz.show_correct_answers === "boolean" ? sourceQuiz.show_correct_answers : undefined,
@@ -369,15 +379,96 @@ function buildQuizCloneInput(
     cant_go_back: typeof sourceQuiz.cant_go_back === "boolean" ? sourceQuiz.cant_go_back : undefined,
     access_code: typeof sourceQuiz.access_code === "string" ? sourceQuiz.access_code : undefined,
     ip_filter: typeof sourceQuiz.ip_filter === "string" ? sourceQuiz.ip_filter : undefined,
-    due_at: typeof sourceQuiz.due_at === "string" ? sourceQuiz.due_at : undefined,
-    lock_at: typeof sourceQuiz.lock_at === "string" ? sourceQuiz.lock_at : undefined,
-    unlock_at: typeof sourceQuiz.unlock_at === "string" ? sourceQuiz.unlock_at : undefined,
+    due_at:
+      preserveAvailabilityDates && typeof sourceQuiz.due_at === "string" ? sourceQuiz.due_at : undefined,
+    lock_at:
+      preserveAvailabilityDates && typeof sourceQuiz.lock_at === "string" ? sourceQuiz.lock_at : undefined,
+    unlock_at:
+      preserveAvailabilityDates && typeof sourceQuiz.unlock_at === "string" ? sourceQuiz.unlock_at : undefined,
     lock_questions_after_answering:
       typeof sourceQuiz.lock_questions_after_answering === "boolean"
         ? sourceQuiz.lock_questions_after_answering
         : undefined,
     hide_results: typeof sourceQuiz.hide_results === "string" ? sourceQuiz.hide_results : undefined
   };
+}
+
+async function findExactQuizByTitleIfExists(
+  client: CanvasClient,
+  courseId: number,
+  quizTitle: string
+): Promise<Awaited<ReturnType<CanvasClient["listQuizzes"]>>[number] | undefined> {
+  const matches = (await client.listQuizzes(courseId, quizTitle)).filter(
+    (quiz) => normalizeName(quiz.title) === normalizeName(quizTitle)
+  );
+  if (matches.length > 1) {
+    const names = matches.map((quiz) => `${quiz.title} (${quiz.id})`).join(", ");
+    throw new Error(`Multiple quizzes matched "${quizTitle}" in course ${courseId}: ${names}`);
+  }
+  return matches[0];
+}
+
+async function resolveExactQuizCloneSource(input: {
+  client: CanvasClient;
+  sourceCourseId: number;
+  sourceTitle: string;
+}): Promise<{
+  summary: Awaited<ReturnType<CanvasClient["listQuizzes"]>>[number];
+  quiz: Awaited<ReturnType<CanvasClient["getQuiz"]>>;
+  questions: Awaited<ReturnType<CanvasClient["listQuizQuestions"]>>;
+}> {
+  const sourceCandidates = await input.client.listQuizzes(input.sourceCourseId, input.sourceTitle);
+  const sourceMatches = sourceCandidates.filter(
+    (quiz) => normalizeName(quiz.title) === normalizeName(input.sourceTitle)
+  );
+  if (sourceMatches.length === 0) {
+    const suggestions = sourceCandidates.map((quiz) => quiz.title).join(", ");
+    if (!suggestions) {
+      throw new Error(
+        `No quizzes found in source course ${input.sourceCourseId} matching "${input.sourceTitle}".`
+      );
+    }
+    throw new Error(
+      `No exact source quiz match for "${input.sourceTitle}" in course ${input.sourceCourseId}. Closest matches: ${suggestions}`
+    );
+  }
+  if (sourceMatches.length > 1) {
+    const names = sourceMatches.map((quiz) => `${quiz.title} (${quiz.id})`).join(", ");
+    throw new Error(`Multiple source quizzes matched "${input.sourceTitle}": ${names}`);
+  }
+
+  const summary = sourceMatches[0];
+  const quiz = await input.client.getQuiz(input.sourceCourseId, summary.id);
+  const questions = await input.client.listQuizQuestions(input.sourceCourseId, summary.id);
+  return { summary, quiz, questions };
+}
+
+async function cloneQuizToCourse(input: {
+  client: CanvasClient;
+  sourceCourseId: number;
+  targetCourseId: number;
+  sourceQuiz: Awaited<ReturnType<CanvasClient["getQuiz"]>>;
+  sourceQuestions: Awaited<ReturnType<CanvasClient["listQuizQuestions"]>>;
+  title: string;
+}): Promise<{ id: number; title: string; html_url?: string }> {
+  const preserveCourseScopedFields = input.sourceCourseId === input.targetCourseId;
+  const created = await input.client.createQuiz(
+    input.targetCourseId,
+    buildQuizCloneInput(input.sourceQuiz as Record<string, unknown>, input.title, {
+      preserveAssignmentGroup: preserveCourseScopedFields,
+      preserveAvailabilityDates: preserveCourseScopedFields
+    })
+  );
+
+  for (const sourceQuestion of input.sourceQuestions) {
+    await input.client.addQuizQuestion(
+      input.targetCourseId,
+      created.id,
+      sanitizeQuestionForCreate(sourceQuestion)
+    );
+  }
+
+  return created;
 }
 
 type TodaySectionAssets = {
@@ -524,12 +615,32 @@ type OrchestratorTaskSectionStep = {
   publish?: boolean;
 };
 
+type OrchestratorCloneSurveyStep = {
+  type: "clone-survey";
+  sourceTitle: string;
+  title: string;
+  sourceCourseId?: number;
+  afterHeaderTitle?: string;
+  skipExisting?: boolean;
+};
+
+type OrchestratorCreateSurveyStep = {
+  type: "create-survey";
+  fromFile: string;
+  title?: string;
+  afterHeaderTitle?: string;
+  skipExisting?: boolean;
+  publish?: boolean;
+};
+
 type OrchestratorStep =
   | OrchestratorSessionHeadersStep
   | OrchestratorSubheaderStep
   | OrchestratorPageStep
   | OrchestratorTodaySectionStep
-  | OrchestratorTaskSectionStep;
+  | OrchestratorTaskSectionStep
+  | OrchestratorCloneSurveyStep
+  | OrchestratorCreateSurveyStep;
 const LOCAL_VIDEO_EXTENSIONS = new Set([
   ".mp4",
   ".webm",
@@ -1827,6 +1938,27 @@ function findModuleSubHeaderByTitle(
   );
 }
 
+function findModuleQuizItemByTitle(
+  moduleItems: CanvasModuleItem[],
+  quizTitle: string
+): CanvasModuleItem | undefined {
+  return moduleItems.find(
+    (item) => item.type === "Quiz" && normalizeName(item.title) === normalizeName(quizTitle)
+  );
+}
+
+function findModuleQuizItem(
+  moduleItems: CanvasModuleItem[],
+  quizTitle: string,
+  quizId?: number
+): CanvasModuleItem | undefined {
+  if (quizId !== undefined) {
+    const byContentId = moduleItems.find((item) => item.type === "Quiz" && item.content_id === quizId);
+    if (byContentId) return byContentId;
+  }
+  return findModuleQuizItemByTitle(moduleItems, quizTitle);
+}
+
 async function findExactModuleByNameIfExists(
   client: CanvasClient,
   courseId: number,
@@ -1932,6 +2064,47 @@ async function ensureModulePagePlacement(input: {
       input.courseId,
       input.moduleId,
       moduleItemForPage.id,
+      input.insertionPosition
+    );
+    return {
+      createdModuleItem: false,
+      movedModuleItem: true
+    };
+  }
+
+  return {
+    createdModuleItem: false,
+    movedModuleItem: false
+  };
+}
+
+async function ensureModuleQuizPlacement(input: {
+  client: CanvasClient;
+  courseId: number;
+  moduleId: number;
+  moduleItems: CanvasModuleItem[];
+  quizTitle: string;
+  quizId: number;
+  insertionPosition: number;
+}): Promise<EnsureModulePagePlacementResult> {
+  const moduleItemForQuiz = findModuleQuizItem(input.moduleItems, input.quizTitle, input.quizId);
+  if (!moduleItemForQuiz) {
+    await input.client.createModuleQuizItem(input.courseId, input.moduleId, {
+      title: input.quizTitle,
+      quizId: input.quizId,
+      position: input.insertionPosition
+    });
+    return {
+      createdModuleItem: true,
+      movedModuleItem: false
+    };
+  }
+
+  if (moduleItemForQuiz.position !== input.insertionPosition) {
+    await input.client.updateModuleItemPosition(
+      input.courseId,
+      input.moduleId,
+      moduleItemForQuiz.id,
       input.insertionPosition
     );
     return {
@@ -2560,6 +2733,315 @@ async function runModulePageWorkflow(input: {
   console.log(`Page URL: ${env.canvasBaseUrl}/courses/${input.courseId}/pages/${pageResult.pageUrl}`);
 }
 
+async function runCloneSurveyBatchWorkflow(input: {
+  sourceCourseId: number;
+  targetCourseId: number;
+  sourceTitle: string;
+  titleTemplate: string;
+  sessionNumbers: number[];
+  pad: number;
+  skipExisting: boolean;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const source = await resolveExactQuizCloneSource({
+    client,
+    sourceCourseId: input.sourceCourseId,
+    sourceTitle: input.sourceTitle
+  });
+  const planned = input.sessionNumbers.map((sessionNumber) => ({
+    sessionNumber,
+    title: renderTitle(input.titleTemplate, sessionNumber, input.pad)
+  }));
+
+  const duplicatePlannedTitle = planned.find((item, index) =>
+    planned.findIndex((other) => normalizeName(other.title) === normalizeName(item.title)) !== index
+  );
+  if (duplicatePlannedTitle) {
+    throw new Error(`Generated duplicate title "${duplicatePlannedTitle.title}". Adjust the title template.`);
+  }
+
+  const existingTargets = new Map<string, Awaited<ReturnType<CanvasClient["listQuizzes"]>>[number]>();
+  for (const item of planned) {
+    const existing = await findExactQuizByTitleIfExists(client, input.targetCourseId, item.title);
+    if (existing) {
+      existingTargets.set(normalizeName(item.title), existing);
+    }
+  }
+
+  if (existingTargets.size > 0 && !input.skipExisting) {
+    const names = planned
+      .filter((item) => existingTargets.has(normalizeName(item.title)))
+      .map((item) => item.title)
+      .join(", ");
+    throw new Error(`Generated titles already exist: ${names}. Use --skip-existing to continue.`);
+  }
+
+  console.log(`Target course: ${input.targetCourseId}`);
+  console.log(`Source course: ${input.sourceCourseId}`);
+  console.log(`Source quiz: ${source.summary.title} (${source.summary.id})`);
+  console.log(`Source type: ${source.quiz.quiz_type ?? "assignment"}`);
+  console.log(`Questions to copy: ${source.questions.length}`);
+  console.log(`Title template: ${input.titleTemplate}`);
+  if (input.sourceCourseId !== input.targetCourseId) {
+    console.log("Cross-course clone: assignment group and availability dates will not be copied.");
+  }
+  console.log("Planned copies:");
+  for (const item of planned) {
+    const existing = existingTargets.get(normalizeName(item.title));
+    console.log(
+      `- Session ${String(item.sessionNumber).padStart(input.pad, "0")}: ${item.title}${existing ? ` [exists: ${existing.id}]` : ""}`
+    );
+  }
+
+  if (input.dryRun) {
+    console.log("Dry run: no quizzes created.");
+    return;
+  }
+
+  const skipped: string[] = [];
+  const created: Array<{ id: number; title: string }> = [];
+  for (const item of planned) {
+    const existing = existingTargets.get(normalizeName(item.title));
+    if (existing) {
+      skipped.push(item.title);
+      continue;
+    }
+
+    const newQuiz = await cloneQuizToCourse({
+      client,
+      sourceCourseId: input.sourceCourseId,
+      targetCourseId: input.targetCourseId,
+      sourceQuiz: source.quiz,
+      sourceQuestions: source.questions,
+      title: item.title
+    });
+    created.push(newQuiz);
+    existingTargets.set(normalizeName(item.title), newQuiz);
+    console.log(`Created: ${item.title} (${newQuiz.id})`);
+  }
+
+  console.log(`Created ${created.length} quiz copy/copies.`);
+  if (skipped.length > 0) {
+    console.log(`Skipped ${skipped.length} existing title(s): ${skipped.join(", ")}`);
+  }
+}
+
+async function runModuleCloneSurveyWorkflow(input: {
+  courseId: number;
+  moduleName: string;
+  sourceCourseId: number;
+  sourceTitle: string;
+  title: string;
+  afterHeaderTitle?: string;
+  skipExisting: boolean;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const source = await resolveExactQuizCloneSource({
+    client,
+    sourceCourseId: input.sourceCourseId,
+    sourceTitle: input.sourceTitle
+  });
+  const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, input.title);
+  const module = await resolveModuleByName(client, input.courseId, input.moduleName);
+  const moduleItems = await client.listModuleItems(input.courseId, module.id);
+  const insertionPosition = resolveModulePageInsertionPosition(moduleItems, input.afterHeaderTitle);
+  const existingModuleItem = findModuleQuizItem(moduleItems, input.title, existingQuiz?.id);
+
+  console.log(`Module: ${module.name} (${module.id})`);
+  console.log(`Source course: ${input.sourceCourseId}`);
+  console.log(`Source survey: ${source.summary.title} (${source.summary.id})`);
+  console.log(`Source type: ${source.quiz.quiz_type ?? "assignment"}`);
+  console.log(`Questions to copy: ${source.questions.length}`);
+  console.log(`Target survey title: ${input.title}`);
+  if (input.afterHeaderTitle) {
+    console.log(`Insert after subheader: ${input.afterHeaderTitle}`);
+  }
+  console.log(`Target module position: ${insertionPosition}`);
+  if (input.sourceCourseId !== input.courseId) {
+    console.log("Cross-course clone: assignment group and availability dates will not be copied.");
+  }
+
+  if (input.dryRun) {
+    if (existingQuiz) {
+      console.log(`Dry run: existing survey will be reused (${existingQuiz.id}).`);
+    } else {
+      console.log("Dry run: survey would be cloned into the target course.");
+    }
+
+    if (!existingModuleItem) {
+      console.log("Dry run: survey would be added to the module.");
+    } else if (existingModuleItem.position !== insertionPosition) {
+      console.log("Dry run: survey module item would be moved to the target section.");
+    } else {
+      console.log("Dry run: survey module item placement already correct.");
+    }
+    return;
+  }
+
+  if (existingQuiz && !input.skipExisting) {
+    throw new Error(`Survey "${input.title}" already exists in course ${input.courseId}. Use skipExisting to reuse it.`);
+  }
+
+  const targetQuiz =
+    existingQuiz ??
+    await cloneQuizToCourse({
+      client,
+      sourceCourseId: input.sourceCourseId,
+      targetCourseId: input.courseId,
+      sourceQuiz: source.quiz,
+      sourceQuestions: source.questions,
+      title: input.title
+    });
+
+  if (existingQuiz) {
+    console.log(`Using existing survey: ${targetQuiz.title} (${targetQuiz.id})`);
+  } else {
+    console.log(`Created survey: ${targetQuiz.title} (${targetQuiz.id})`);
+  }
+
+  const placementResult = await ensureModuleQuizPlacement({
+    client,
+    courseId: input.courseId,
+    moduleId: module.id,
+    moduleItems,
+    quizTitle: input.title,
+    quizId: targetQuiz.id,
+    insertionPosition
+  });
+
+  if (placementResult.createdModuleItem) console.log("Added survey to session module.");
+  if (placementResult.movedModuleItem) console.log("Moved survey module item to target section.");
+  if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
+    console.log("Survey module item placement already correct.");
+  }
+  console.log(`Quiz URL: ${env.canvasBaseUrl}/courses/${input.courseId}/quizzes/${targetQuiz.id}`);
+}
+
+async function loadSurveyFromFile(filePath: string): Promise<ReturnType<typeof validateNexgenSurvey>> {
+  const raw = JSON.parse(await fs.readFile(filePath, "utf8"));
+  return validateNexgenSurvey(raw);
+}
+
+function summarizeSurveyQuestionTypes(
+  questions: ReturnType<typeof validateNexgenSurvey>["questions"]
+): string {
+  const counts = new Map<string, number>();
+  for (const question of questions) {
+    counts.set(question.type, (counts.get(question.type) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([type, count]) => `${type}:${count}`)
+    .join(", ");
+}
+
+async function runCreateSurveyWorkflow(input: {
+  courseId: number;
+  surveyFilePath: string;
+  title?: string;
+  publish: boolean;
+  skipExisting: boolean;
+  moduleName?: string;
+  afterHeaderTitle?: string;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const survey = await loadSurveyFromFile(input.surveyFilePath);
+  const effectiveTitle = input.title ?? survey.title;
+  const mapped = mapToCanvasSurvey(survey, {
+    title: effectiveTitle,
+    published: input.publish
+  });
+  const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
+
+  let module: CanvasModuleSummary | undefined;
+  let moduleItems: CanvasModuleItem[] = [];
+  let insertionPosition: number | undefined;
+  let existingModuleItem: CanvasModuleItem | undefined;
+  if (input.moduleName) {
+    module = await resolveModuleByName(client, input.courseId, input.moduleName);
+    moduleItems = await client.listModuleItems(input.courseId, module.id);
+    insertionPosition = resolveModulePageInsertionPosition(moduleItems, input.afterHeaderTitle);
+    existingModuleItem = findModuleQuizItem(moduleItems, effectiveTitle, existingQuiz?.id);
+  }
+
+  console.log(`Course: ${input.courseId}`);
+  console.log(`Survey file: ${input.surveyFilePath}`);
+  console.log(`Survey title: ${effectiveTitle}`);
+  console.log(`Survey type: ${mapped.canvasQuiz.quiz_type}`);
+  console.log(`Questions: ${survey.questions.length}`);
+  console.log(`Question types: ${summarizeSurveyQuestionTypes(survey.questions)}`);
+  if (input.moduleName && module && insertionPosition !== undefined) {
+    console.log(`Module: ${module.name} (${module.id})`);
+    if (input.afterHeaderTitle) {
+      console.log(`Insert after subheader: ${input.afterHeaderTitle}`);
+    }
+    console.log(`Target module position: ${insertionPosition}`);
+  }
+
+  if (input.dryRun) {
+    console.log(
+      existingQuiz
+        ? `Dry run: existing survey will be reused (${existingQuiz.id}).`
+        : "Dry run: survey would be created."
+    );
+    if (input.moduleName) {
+      if (!existingModuleItem) {
+        console.log("Dry run: survey would be added to the module.");
+      } else if (existingModuleItem.position !== insertionPosition) {
+        console.log("Dry run: survey module item would be moved to the target section.");
+      } else {
+        console.log("Dry run: survey module item placement already correct.");
+      }
+    }
+    return;
+  }
+
+  if (existingQuiz && !input.skipExisting) {
+    throw new Error(`Survey "${effectiveTitle}" already exists in course ${input.courseId}. Use --skip-existing to reuse it.`);
+  }
+
+  const targetQuiz =
+    existingQuiz ??
+    await (async () => {
+      const created = await client.createQuiz(input.courseId, mapped.canvasQuiz);
+      for (const question of mapped.canvasQuestions) {
+        await client.addQuizQuestion(input.courseId, created.id, question);
+      }
+      return created;
+    })();
+
+  if (existingQuiz) {
+    console.log(`Using existing survey: ${targetQuiz.title} (${targetQuiz.id})`);
+  } else {
+    console.log(`Created survey: ${targetQuiz.title} (${targetQuiz.id})`);
+  }
+
+  if (module && insertionPosition !== undefined) {
+    const placementResult = await ensureModuleQuizPlacement({
+      client,
+      courseId: input.courseId,
+      moduleId: module.id,
+      moduleItems,
+      quizTitle: effectiveTitle,
+      quizId: targetQuiz.id,
+      insertionPosition
+    });
+
+    if (placementResult.createdModuleItem) console.log("Added survey to session module.");
+    if (placementResult.movedModuleItem) console.log("Moved survey module item to target section.");
+    if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
+      console.log("Survey module item placement already correct.");
+    }
+  }
+
+  console.log(`Quiz URL: ${env.canvasBaseUrl}/courses/${input.courseId}/quizzes/${targetQuiz.id}`);
+}
+
 function requireObjectRecord(input: unknown, pathLabel: string): Record<string, unknown> {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     throw new Error(`${pathLabel} must be an object.`);
@@ -2757,6 +3239,30 @@ function interpolateOrchestratorStep(
           : undefined,
         publish: step.publish
       };
+    case "clone-survey":
+      return {
+        type: step.type,
+        sourceTitle: interpolateTemplateString(step.sourceTitle, context, `${pathLabel}.sourceTitle`),
+        title: interpolateTemplateString(step.title, context, `${pathLabel}.title`),
+        sourceCourseId: step.sourceCourseId,
+        afterHeaderTitle: step.afterHeaderTitle
+          ? interpolateTemplateString(step.afterHeaderTitle, context, `${pathLabel}.afterHeaderTitle`)
+          : undefined,
+        skipExisting: step.skipExisting
+      };
+    case "create-survey":
+      return {
+        type: step.type,
+        fromFile: interpolateTemplateString(step.fromFile, context, `${pathLabel}.fromFile`),
+        title: step.title
+          ? interpolateTemplateString(step.title, context, `${pathLabel}.title`)
+          : undefined,
+        afterHeaderTitle: step.afterHeaderTitle
+          ? interpolateTemplateString(step.afterHeaderTitle, context, `${pathLabel}.afterHeaderTitle`)
+          : undefined,
+        skipExisting: step.skipExisting,
+        publish: step.publish
+      };
   }
 }
 
@@ -2846,6 +3352,24 @@ function parseOrchestratorStep(input: unknown, pathLabel: string): OrchestratorS
         pageTitle: optionalString(record.pageTitle, `${pathLabel}.pageTitle`),
         notes: optionalString(record.notes, `${pathLabel}.notes`),
         notesFile: optionalString(record.notesFile, `${pathLabel}.notesFile`),
+        publish: optionalBoolean(record.publish, `${pathLabel}.publish`)
+      };
+    case "clone-survey":
+      return {
+        type,
+        sourceTitle: requireNonEmptyString(record.sourceTitle, `${pathLabel}.sourceTitle`),
+        title: requireNonEmptyString(record.title, `${pathLabel}.title`),
+        sourceCourseId: optionalPositiveInteger(record.sourceCourseId, `${pathLabel}.sourceCourseId`),
+        afterHeaderTitle: optionalString(record.afterHeaderTitle, `${pathLabel}.afterHeaderTitle`),
+        skipExisting: optionalBoolean(record.skipExisting, `${pathLabel}.skipExisting`)
+      };
+    case "create-survey":
+      return {
+        type,
+        fromFile: requireNonEmptyString(record.fromFile, `${pathLabel}.fromFile`),
+        title: optionalString(record.title, `${pathLabel}.title`),
+        afterHeaderTitle: optionalString(record.afterHeaderTitle, `${pathLabel}.afterHeaderTitle`),
+        skipExisting: optionalBoolean(record.skipExisting, `${pathLabel}.skipExisting`),
         publish: optionalBoolean(record.publish, `${pathLabel}.publish`)
       };
     default:
@@ -3070,6 +3594,42 @@ async function runCourseOrchestrateWorkflow(input: {
           continue;
         }
 
+        if (step.type === "clone-survey") {
+          const sourceCourseId = step.sourceCourseId ?? input.courseId;
+          const source = await resolveExactQuizCloneSource({
+            client,
+            sourceCourseId,
+            sourceTitle: step.sourceTitle
+          });
+          const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, step.title);
+          console.log(
+            existingQuiz
+              ? `Dry run: existing survey "${step.title}" will be reused (${existingQuiz.id}).`
+              : `Dry run: survey "${step.title}" would be cloned from course ${sourceCourseId} after module creation.`
+          );
+          console.log(`Source survey: ${source.summary.title} (${source.summary.id})`);
+          if (step.afterHeaderTitle) {
+            console.log(`Dry run: survey would be placed under "${step.afterHeaderTitle}" after module creation.`);
+          }
+          continue;
+        }
+
+        if (step.type === "create-survey") {
+          const surveyFilePath = path.resolve(blueprintDir, step.fromFile);
+          const survey = await loadSurveyFromFile(surveyFilePath);
+          const effectiveTitle = step.title ?? survey.title;
+          const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
+          console.log(
+            existingQuiz
+              ? `Dry run: existing survey "${effectiveTitle}" will be reused (${existingQuiz.id}).`
+              : `Dry run: survey "${effectiveTitle}" would be created after module creation from ${step.fromFile}.`
+          );
+          if (step.afterHeaderTitle) {
+            console.log(`Dry run: survey would be placed under "${step.afterHeaderTitle}" after module creation.`);
+          }
+          continue;
+        }
+
         console.log("Dry run: full preview requires the module to exist first; step skipped.");
         continue;
       }
@@ -3141,6 +3701,32 @@ async function runCourseOrchestrateWorkflow(input: {
             notesFilePath: step.notesFile ? path.resolve(blueprintDir, step.notesFile) : undefined,
             publish: Boolean(step.publish),
             assetsRoot: input.assetsRoot,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+        case "clone-survey":
+          await runModuleCloneSurveyWorkflow({
+            courseId: input.courseId,
+            moduleName: moduleSpec.name,
+            sourceCourseId: step.sourceCourseId ?? input.courseId,
+            sourceTitle: step.sourceTitle,
+            title: step.title,
+            afterHeaderTitle: step.afterHeaderTitle,
+            skipExisting: step.skipExisting ?? true,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+        case "create-survey":
+          await runCreateSurveyWorkflow({
+            courseId: input.courseId,
+            surveyFilePath: path.resolve(blueprintDir, step.fromFile),
+            title: step.title,
+            publish: Boolean(step.publish),
+            skipExisting: step.skipExisting ?? true,
+            moduleName: moduleSpec.name,
+            afterHeaderTitle: step.afterHeaderTitle,
             dryRun: input.dryRun,
             client
           });
@@ -3267,6 +3853,37 @@ program.command("course-files-scaffold")
     }
   });
 
+program.command("create-survey")
+  .description("Create an ungraded or graded survey in Canvas from a survey JSON file.")
+  .requiredOption("--from-file <path>", "Path to the Nexgen survey JSON file")
+  .option("--title <title>", "Override survey title")
+  .option("--module-name <name>", "Optional module name to place the survey into")
+  .option("--after-header-title <title>", "Optional subheader title to place the survey after")
+  .option("--publish", "Publish survey after create/update (default is unpublished)", false)
+  .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
+  .option("--skip-existing", "Reuse an existing survey with the same target title", false)
+  .option("--dry-run", "Show planned survey creation and placement without Canvas writes", false)
+  .action(async (opts) => {
+    const courseId = Number(opts.courseId);
+    if (!Number.isFinite(courseId)) {
+      throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+    }
+    if (opts.afterHeaderTitle && !opts.moduleName) {
+      throw new Error("--after-header-title requires --module-name.");
+    }
+
+    await runCreateSurveyWorkflow({
+      courseId,
+      surveyFilePath: path.resolve(String(opts.fromFile)),
+      title: opts.title ? String(opts.title) : undefined,
+      publish: Boolean(opts.publish),
+      skipExisting: Boolean(opts.skipExisting),
+      moduleName: opts.moduleName ? String(opts.moduleName) : undefined,
+      afterHeaderTitle: opts.afterHeaderTitle ? String(opts.afterHeaderTitle) : undefined,
+      dryRun: Boolean(opts.dryRun)
+    });
+  });
+
 program.command("session-headers")
   .description("Create session text headers inside an existing Canvas module.")
   .requiredOption("--module-name <name>", "Canvas module name to add headers to")
@@ -3295,6 +3912,7 @@ program.command("clone-survey")
   .option("--range <start-end>", "Inclusive session number range (for example, 2-7)")
   .option("--sessions <numbers>", "Comma-separated session numbers (for example, 2,3,5)")
   .option("--pad <number>", "Zero-padding width for {nn}", "2")
+  .option("--source-course-id <id>", "Canvas course id to clone the source quiz/survey from")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
   .option("--skip-existing", "Skip generated titles that already exist in the course", false)
   .option("--dry-run", "Show planned copies without creating quizzes", false)
@@ -3314,89 +3932,22 @@ program.command("clone-survey")
       opts.range ? String(opts.range) : undefined,
       opts.sessions ? String(opts.sessions) : undefined
     );
-    const client = new CanvasClient();
-
-    const sourceCandidates = await client.listQuizzes(courseId, sourceTitle);
-    const sourceMatches = sourceCandidates.filter((quiz) => normalizeName(quiz.title) === normalizeName(sourceTitle));
-    if (sourceMatches.length === 0) {
-      const suggestions = sourceCandidates.map((quiz) => quiz.title).join(", ");
-      if (!suggestions) {
-        throw new Error(`No quizzes found matching "${sourceTitle}".`);
-      }
-      throw new Error(`No exact source quiz match for "${sourceTitle}". Closest matches: ${suggestions}`);
-    }
-    if (sourceMatches.length > 1) {
-      const names = sourceMatches.map((quiz) => `${quiz.title} (${quiz.id})`).join(", ");
-      throw new Error(`Multiple source quizzes matched "${sourceTitle}": ${names}`);
-    }
-
-    const sourceQuizSummary = sourceMatches[0];
-    const sourceQuiz = await client.getQuiz(courseId, sourceQuizSummary.id);
-    const sourceQuestions = await client.listQuizQuestions(courseId, sourceQuizSummary.id);
-
-    const rawTemplate = opts.titleTemplate
-      ? String(opts.titleTemplate)
-      : deriveTitleTemplate(sourceQuizSummary.title);
+    const sourceCourseId = opts.sourceCourseId
+      ? parsePositiveInteger(String(opts.sourceCourseId), "--source-course-id")
+      : courseId;
+    const rawTemplate = opts.titleTemplate ? String(opts.titleTemplate) : deriveTitleTemplate(sourceTitle);
     const titleTemplate = ensureTemplateToken(rawTemplate);
-    const planned = sessionNumbers.map((sessionNumber) => ({
-      sessionNumber,
-      title: renderTitle(titleTemplate, sessionNumber, pad)
-    }));
 
-    const duplicatePlannedTitle = planned.find((item, index) =>
-      planned.findIndex((other) => normalizeName(other.title) === normalizeName(item.title)) !== index
-    );
-    if (duplicatePlannedTitle) {
-      throw new Error(`Generated duplicate title "${duplicatePlannedTitle.title}". Adjust --title-template.`);
-    }
-
-    const existingQuizzes = await client.listQuizzes(courseId);
-    const existingTitleSet = new Set(existingQuizzes.map((quiz) => normalizeName(quiz.title)));
-    const existingTargets = planned.filter((item) => existingTitleSet.has(normalizeName(item.title)));
-    if (existingTargets.length > 0 && !opts.skipExisting) {
-      const names = existingTargets.map((item) => item.title).join(", ");
-      throw new Error(`Generated titles already exist: ${names}. Use --skip-existing to continue.`);
-    }
-
-    console.log(`Course: ${courseId}`);
-    console.log(`Source quiz: ${sourceQuizSummary.title} (${sourceQuizSummary.id})`);
-    console.log(`Source type: ${sourceQuiz.quiz_type ?? "assignment"}`);
-    console.log(`Questions to copy: ${sourceQuestions.length}`);
-    console.log(`Title template: ${titleTemplate}`);
-    console.log("Planned copies:");
-    for (const item of planned) {
-      const exists = existingTitleSet.has(normalizeName(item.title));
-      console.log(`- Session ${String(item.sessionNumber).padStart(pad, "0")}: ${item.title}${exists ? " [exists]" : ""}`);
-    }
-
-    if (opts.dryRun) {
-      console.log("Dry run: no quizzes created.");
-      return;
-    }
-
-    const skipped: string[] = [];
-    const created: Array<{ id: number; title: string; html_url?: string }> = [];
-    for (const item of planned) {
-      if (existingTitleSet.has(normalizeName(item.title))) {
-        if (opts.skipExisting) {
-          skipped.push(item.title);
-          continue;
-        }
-      }
-
-      const newQuiz = await client.createQuiz(courseId, buildQuizCloneInput(sourceQuiz as Record<string, unknown>, item.title));
-      for (const sourceQuestion of sourceQuestions) {
-        await client.addQuizQuestion(courseId, newQuiz.id, sanitizeQuestionForCreate(sourceQuestion));
-      }
-      created.push(newQuiz);
-      existingTitleSet.add(normalizeName(item.title));
-      console.log(`Created: ${item.title} (${newQuiz.id})`);
-    }
-
-    console.log(`Created ${created.length} quiz copy/copies.`);
-    if (skipped.length > 0) {
-      console.log(`Skipped ${skipped.length} existing title(s): ${skipped.join(", ")}`);
-    }
+    await runCloneSurveyBatchWorkflow({
+      sourceCourseId,
+      targetCourseId: courseId,
+      sourceTitle,
+      titleTemplate,
+      sessionNumbers,
+      pad,
+      skipExisting: Boolean(opts.skipExisting),
+      dryRun: Boolean(opts.dryRun)
+    });
   });
 
 program.command("teacher-notes")
@@ -3704,7 +4255,10 @@ program.command("today-section")
 program.command("course-orchestrate")
   .description("Create or update multiple course modules and pages from a JSON blueprint.")
   .requiredOption("--course-id <id>", "Canvas course id to target")
-  .requiredOption("--from-file <path>", "Path to the course orchestration JSON blueprint")
+  .requiredOption(
+    "--from-file <path>",
+    "Path to the course orchestration JSON blueprint, typically under apps/cli/course-assets/<course>/orchestrator.json"
+  )
   .option(
     "--assets-root <path>",
     "Local root for section assets used by session workflows",

@@ -28,6 +28,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 ## Command Summary
 ### Main CLI (`apps/cli/src/cli.ts`)
 - `create`: Creates a Canvas Classic Quiz either from a Nexgen JSON file or generated agent content. It validates the quiz structure and uploads questions to the selected course.
+- `create-survey`: Creates a Canvas survey from a survey JSON file, with support for multiple choice, short answer, essay, and file upload questions.
 - `course-files-scaffold`: Creates a Canvas Files folder scaffold in a course. It supports a built-in default session structure or a custom JSON tree.
 - `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
 - `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
@@ -156,23 +157,56 @@ Options:
 - `--range <start-end>`: Inclusive session range (for example, `2-7`).
 - `--sessions <numbers>`: Comma-separated sessions (for example, `2,3,5`).
 - `--pad <number>`: Width for `{nn}` padding. Default `2`.
+- `--source-course-id <id>`: Optional source Canvas course id. Defaults to `--course-id`.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--skip-existing`: Skip generated titles that already exist.
 - `--dry-run`: Preview only.
 
 Rules:
 - Provide exactly one of `--range` or `--sessions`.
+- Cross-course clones strip course-scoped fields such as assignment group and availability dates.
 
 Examples:
 ```bash
 # Copy Session-01 survey to Session-02..07
 npx tsx apps/cli/src/cli.ts clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --range 2-7 --dry-run
 
+# Copy from a different source course into the target course
+npx tsx apps/cli/src/cli.ts clone-survey --source-course-id 88 --course-id 21 --source-title "Weekly Check-In" --title-template "Weekly Check-In-Session-{nn}" --sessions 1,2,3,4,5,6,7,8 --skip-existing
+
 # Custom template and explicit sessions
 npx tsx apps/cli/src/cli.ts clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --title-template "Weekly-Check-In-Session-{nn}" --sessions 2,3,4,5,6,7
 
 # npm wrapper form
 npm run dev -- clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --range 2-7
+```
+
+### Command: `create-survey`
+Create a Canvas survey from a `nexgen-survey.v1` JSON file.
+
+Options:
+- `--from-file <path>`: Required. Path to the survey JSON file.
+- `--title <title>`: Optional survey title override.
+- `--module-name <name>`: Optional module name to place the survey into.
+- `--after-header-title <title>`: Optional subheader title to place the survey after. Requires `--module-name`.
+- `--publish`: Publish survey after create. Default is unpublished.
+- `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
+- `--skip-existing`: Reuse an existing survey with the same target title.
+- `--dry-run`: Preview only.
+
+Supported survey question types:
+- `multiple_choice_question`
+- `short_answer_question`
+- `essay_question`
+- `file_upload_question`
+
+Examples:
+```bash
+# Preview survey creation only
+npx tsx apps/cli/src/cli.ts create-survey --course-id 21 --from-file apps/cli/course-assets/example-course/shared/weekly-check-in.survey.json --title "Weekly Check-In-Session 01" --dry-run
+
+# Create and place the survey under the Weekly Check-In header in a module
+npx tsx apps/cli/src/cli.ts create-survey --course-id 21 --from-file apps/cli/course-assets/example-course/shared/weekly-check-in.survey.json --title "Weekly Check-In-Session 01" --module-name "Session 01 - Example Build" --after-header-title "Weekly Check-In" --skip-existing
 ```
 
 ### Command: `teacher-notes`
@@ -391,19 +425,53 @@ Blueprint notes:
 - `v2` is the recommended authoring format when you want to generate multiple session modules from one shared structure.
 - Placeholders supported in `v2` string fields include `{n}`, `{nn}`, `{topic}`, and custom values from `sessions[].variables`.
 - Each module entry can create the module if missing, then run ordered workflow steps.
-- Supported step types: `session-headers`, `today-section`, `task-a-section`, `task-b-section`, `task-c-section`, `subheader`, `page`.
+- Supported step types: `session-headers`, `today-section`, `task-a-section`, `task-b-section`, `task-c-section`, `clone-survey`, `create-survey`, `subheader`, `page`.
 - `page` steps use a typed `content` array. Supported content block types: `markdown`, `markdownFile`, `html`, `htmlFile`, `imageFile`.
 - `today-section` and task section steps reuse the same logic as the standalone commands.
+- `clone-survey` reuses the survey clone workflow and can clone from another course into the target course, then place the survey under a module subheader such as `Weekly Check-In`.
+- `clone-survey` step fields: `sourceTitle`, `title`, optional `sourceCourseId`, optional `afterHeaderTitle`, optional `skipExisting`.
+- `create-survey` creates a survey from a JSON file and can place it under a module subheader such as `Weekly Check-In`.
+- `create-survey` step fields: `fromFile`, optional `title`, optional `afterHeaderTitle`, optional `skipExisting`, optional `publish`.
+- Recommended repo layout:
+  `apps/cli/course-assets/<course-name>/orchestrator.json`
+  with sibling `pages/`, `shared/`, and `README.md` files inside the same course folder.
+- `page.content[].path`, `today-section.notesFile`, and task `notesFile` paths are resolved relative to the blueprint file.
+- `session-assets` remains the local authoring root for reused session workflows such as `today-section` and task sections.
 - On a brand-new module, `--dry-run` can fully plan structural steps immediately. Module-aware content previews such as `today-section` may be skipped until the module exists or a live run creates it.
-- Example blueprint: `apps/cli/examples/course-orchestrator.example.json`
+- Example blueprint: `apps/cli/course-assets/example-course/orchestrator.json`
 
 Examples:
 ```bash
 # Plan a multi-module orchestration run
-npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/examples/course-orchestrator.example.json --dry-run
+npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/course-assets/example-course/orchestrator.json --dry-run
 
 # Apply the blueprint to the target course
-npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/examples/course-orchestrator.example.json
+npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/course-assets/example-course/orchestrator.json
+```
+
+`clone-survey` step example:
+
+```json
+{
+  "type": "clone-survey",
+  "sourceCourseId": 88,
+  "sourceTitle": "Weekly Check-In",
+  "title": "Weekly Check-In-Session {nn}",
+  "afterHeaderTitle": "Weekly Check-In",
+  "skipExisting": true
+}
+```
+
+`create-survey` step example:
+
+```json
+{
+  "type": "create-survey",
+  "fromFile": "shared/weekly-check-in.survey.json",
+  "title": "Weekly Check-In-Session {nn}",
+  "afterHeaderTitle": "Weekly Check-In",
+  "skipExisting": true
+}
 ```
 
 ### Plugins Runner

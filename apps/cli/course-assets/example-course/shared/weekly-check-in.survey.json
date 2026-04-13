@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "nexgen-survey.v1",
+  "title": "Weekly Check-In",
+  "description": "<p>Short, ungraded reflection survey for each session.</p>",
+  "settings": {
+    "surveyType": "survey",
+    "shuffleAnswers": false
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "type": "multiple_choice_question",
+      "prompt": "How did today's session feel?",
+      "choices": [
+        "Very confusing",
+        "Slightly confusing",
+        "Kind of not confusing",
+        "Quite clear",
+        "Very clear"
+      ]
+    },
+    {
+      "id": "Q2",
+      "type": "short_answer_question",
+      "prompt": "Name one thing that you learned today."
+    },
+    {
+      "id": "Q3",
+      "type": "short_answer_question",
+      "prompt": "Name one thing that we could have done better today."
+    },
+    {
+      "id": "Q4",
+      "type": "file_upload_question",
+      "prompt": "This is optional but we would like you to upload a picture of something that captured the essence of your session. This could be a screenshot of your work or your project so far. Please do not include pictures of student faces as we cannot publish these without parental permission. Your teacher or instructor will take any such photos during the term."
+    }
+  ]
+}

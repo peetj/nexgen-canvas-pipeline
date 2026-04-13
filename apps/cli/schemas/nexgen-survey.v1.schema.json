@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nexgenstemschool.com.au/schemas/nexgen-survey.v1.schema.json",
+  "title": "NexgenSurveyV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "title", "questions"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "nexgen-survey.v1"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 120
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "surveyType": {
+          "type": "string",
+          "enum": ["survey", "graded_survey"]
+        },
+        "shuffleAnswers": {
+          "type": "boolean"
+        }
+      }
+    },
+    "questions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/question"
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prompt": { "type": "string", "maxLength": 4000 },
+        "generator": { "type": "string", "maxLength": 120 },
+        "generatedAtUtc": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "question": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "prompt", "choices"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^Q[1-9][0-9]*$"
+            },
+            "type": {
+              "type": "string",
+              "const": "multiple_choice_question"
+            },
+            "prompt": {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 1000
+            },
+            "choices": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 10,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "prompt"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^Q[1-9][0-9]*$"
+            },
+            "type": {
+              "type": "string",
+              "enum": ["short_answer_question", "essay_question", "file_upload_question"]
+            },
+            "prompt": {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 1000
+            }
+          }
+        }
+      ]
+    }
+  }
+}
