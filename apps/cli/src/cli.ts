@@ -21,6 +21,7 @@ import {
 } from "./session/taskASection.js";
 import { buildWhatAreWeDoingTodaySection } from "./session/whatAreWeDoingToday.js";
 import { loadConfig } from "./config.js";
+import { findLocalImageFile, LOCAL_IMAGE_EXTENSIONS } from "./localImage.js";
 
 const program = new Command();
 const TOKEN_PADDED = "{nn}";
@@ -440,15 +441,6 @@ type CanvasFolderNode = {
 type CanvasFolderStructureFile = {
   folders?: unknown;
 };
-const LOCAL_IMAGE_EXTENSIONS = new Set([
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-  ".gif",
-  ".svg",
-  ".avif"
-]);
 const LOCAL_VIDEO_EXTENSIONS = new Set([
   ".mp4",
   ".webm",
@@ -660,24 +652,6 @@ function extensionForMimeType(mimeType: string): string {
     default:
       return "";
   }
-}
-
-async function findLocalImageFile(folderPath: string): Promise<string | undefined> {
-  const entries = await fs.readdir(folderPath, { withFileTypes: true });
-  const candidates = entries
-    .filter((entry) => entry.isFile())
-    .map((entry) => entry.name)
-    .filter((name) => LOCAL_IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase()));
-
-  if (candidates.length === 0) return undefined;
-
-  candidates.sort((a, b) => {
-    const aImage = /^image\./i.test(a) ? 0 : 1;
-    const bImage = /^image\./i.test(b) ? 0 : 1;
-    if (aImage !== bImage) return aImage - bImage;
-    return a.localeCompare(b);
-  });
-  return path.resolve(folderPath, candidates[0]);
 }
 
 async function optimizeImageBufferWithSharp(
@@ -916,6 +890,7 @@ async function prepareTodaySectionAssets(input: {
   notesFilePath?: string;
   imageUrl?: string;
   imageId?: number;
+  imageFilePath?: string;
   aiImagePrompt?: string;
   client?: CanvasClient;
 }): Promise<TodaySectionAssets> {
@@ -959,7 +934,7 @@ Write one or two short paragraphs that explain what students are doing in this s
   let imageSource: TodaySectionAssets["imageSource"] = "none";
   let canvasImageId: number | undefined;
   let canvasImageDisplayName: string | undefined;
-  const localImagePath = await findLocalImageFile(folderPath);
+  let localImagePath: string | undefined;
   let localImageOriginalBytes: number | undefined;
   let localImageOutputBytes: number | undefined;
   let localImageOptimized: boolean | undefined;
@@ -979,6 +954,7 @@ Write one or two short paragraphs that explain what students are doing in this s
     canvasImageDisplayName = canvasFile.display_name ?? canvasFile.filename;
     imageSource = "canvas-file-id";
   } else {
+    localImagePath = await findLocalImageFile(folderPath, input.imageFilePath);
     imageUrl = normalizeSingleLineInput(input.imageUrl);
     if (!imageUrl) {
       imageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
@@ -2806,6 +2782,10 @@ program.command("today-section")
   .option("--notes-file <path>", "Optional path to raw notes text/markdown (rewritten by agent)")
   .option("--image-url <url>", "Optional image URL to embed in the section")
   .option("--image-id <id>", "Optional existing Canvas file id to embed in the section")
+  .option(
+    "--image-file <path>",
+    "Optional local image path relative to the session's 'What we are doing Today' folder"
+  )
   .option("--ai-image-prompt <text>", "Optional AI image prompt/brief to include and save locally")
   .option("--publish", "Publish page after create/update (default is unpublished)", false)
   .option(
@@ -2826,6 +2806,12 @@ program.command("today-section")
     if (opts.imageUrl && opts.imageId) {
       throw new Error("Use either --image-url or --image-id, not both.");
     }
+    if (opts.imageUrl && opts.imageFile) {
+      throw new Error("Use either --image-url or --image-file, not both.");
+    }
+    if (opts.imageFile && opts.imageId) {
+      throw new Error("Use either --image-file or --image-id, not both.");
+    }
 
     const sessionName = String(opts.sessionName);
     const sessionMeta = parseSessionMetadata(sessionName);
@@ -2845,6 +2831,7 @@ program.command("today-section")
       notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined,
       imageUrl: opts.imageUrl ? String(opts.imageUrl) : undefined,
       imageId,
+      imageFilePath: opts.imageFile ? String(opts.imageFile) : undefined,
       aiImagePrompt: opts.aiImagePrompt ? String(opts.aiImagePrompt) : undefined,
       client
     });

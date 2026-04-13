@@ -13,7 +13,8 @@
     "build": "tsc -p tsconfig.json",
     "prestart": "npm run -w @nexgen/canvas-sdk build",
     "start": "node dist/cli.js",
-    "lint": "node -e \"console.log('Add eslint later if needed')\""
+    "lint": "node -e \"console.log('Add eslint later if needed')\"",
+    "test": "node --import tsx --test src/localImage.test.ts"
   },
   "dependencies": {
     "@nexgen/canvas-sdk": "file:../../packages/canvas-sdk",
