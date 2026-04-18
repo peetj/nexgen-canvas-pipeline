@@ -30,7 +30,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 - `create`: Creates a Canvas Classic Quiz either from a Nexgen JSON file or generated agent content. It validates the quiz structure and uploads questions to the selected course.
 - `create-survey`: Creates a Canvas survey from a survey JSON file, with support for multiple choice, short answer, essay, and file upload questions.
 - `course-files-scaffold`: Creates a Canvas Files folder scaffold in a course. It supports a built-in default session structure or a custom JSON tree.
-- `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
+- `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number and ensure the matching Canvas Files session folders exist.
 - `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
 - `teacher-notes`: Builds a canonical Teacher Notes page from existing session content. In live mode it updates module placement; in draft mode it prepares a safe draft page without changing live placement.
 - `task-a-section`: Builds/updates a Task A page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task A` header and uploading local media to Canvas Files under `Session_NN/task_a`.
@@ -120,7 +120,7 @@ Options:
 
 Default scaffold:
 - Top level: `Session_00` to `Session_08`, plus `BONUS_Session_09` and `BONUS_Session_10`
-- Second level inside each top-level folder: `teacher_notes`, `what_are_we_doing_today`, `task_a`, `task_b`, `task_c`
+- Second level inside each top-level folder: `teachers_notes`, `what_are_we_doing_today`, `task_a`, `task_b`, `task_c`
 
 JSON format:
 - Either a root array of folders, or an object with a `folders` array.

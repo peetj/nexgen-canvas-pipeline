@@ -89,21 +89,26 @@ function parseQuizDifficulty(input: string, fieldName: string): QuizDifficulty {
   throw new Error(`Invalid ${fieldName}. Use one of: easy, medium, hard, mixed.`);
 }
 
+const SESSION_FILES_CHILD_FOLDER_NAMES = [
+  "teachers_notes",
+  "what_are_we_doing_today",
+  "task_a",
+  "task_b",
+  "task_c"
+] as const;
+
+function buildCanvasSessionFilesFolderNode(sessionFolderName: string): CanvasFolderNode {
+  return {
+    name: sessionFolderName,
+    children: SESSION_FILES_CHILD_FOLDER_NAMES.map((child) => ({ name: child }))
+  };
+}
+
 function buildDefaultCanvasCourseFilesStructure(): CanvasFolderNode[] {
-  const childNames = [
-    "teacher_notes",
-    "what_are_we_doing_today",
-    "task_a",
-    "task_b",
-    "task_c"
-  ];
   const standardSessions = Array.from({ length: 9 }, (_, idx) => `Session_${String(idx).padStart(2, "0")}`);
   const bonusSessions = ["BONUS_Session_09", "BONUS_Session_10"];
 
-  return [...standardSessions, ...bonusSessions].map((name) => ({
-    name,
-    children: childNames.map((child) => ({ name: child }))
-  }));
+  return [...standardSessions, ...bonusSessions].map((name) => buildCanvasSessionFilesFolderNode(name));
 }
 
 function parseCanvasFolderStructureInput(input: unknown): CanvasFolderNode[] {
@@ -766,14 +771,41 @@ function buildIntroductionPageTitle(sessionName: string): string {
   return `Introduction: ${meta.topic}`;
 }
 
-function buildCanvasSectionFilesFolderPath(
-  sessionMeta: SessionMetadata,
-  sectionFolderName: string
+function buildCanvasSessionFilesRootFolderName(
+  sessionMeta: Pick<SessionMetadata, "sessionNumberPadded">
 ): string {
   if (!sessionMeta.sessionNumberPadded) {
     throw new Error("Session number is required to build a Canvas Files folder path.");
   }
-  return `Session_${sessionMeta.sessionNumberPadded}/${sectionFolderName}`;
+  return `Session_${sessionMeta.sessionNumberPadded}`;
+}
+
+function buildCanvasSectionFilesFolderPath(
+  sessionMeta: SessionMetadata,
+  sectionFolderName: string
+): string {
+  return `${buildCanvasSessionFilesRootFolderName(sessionMeta)}/${sectionFolderName}`;
+}
+
+async function ensureCanvasSessionFilesFolders(input: {
+  client: CanvasClient;
+  courseId: number;
+  sessionMeta: SessionMetadata;
+  dryRun: boolean;
+}): Promise<{
+  createdPaths: string[];
+  existingPaths: string[];
+} | undefined> {
+  if (!input.sessionMeta.sessionNumberPadded) {
+    return undefined;
+  }
+
+  return ensureCanvasFolderTree({
+    client: input.client,
+    courseId: input.courseId,
+    folders: [buildCanvasSessionFilesFolderNode(buildCanvasSessionFilesRootFolderName(input.sessionMeta))],
+    dryRun: input.dryRun
+  });
 }
 
 async function ensureFileWithTemplate(filePath: string, content: string): Promise<boolean> {
@@ -2531,6 +2563,14 @@ async function runSessionHeadersWorkflow(input: {
 }): Promise<void> {
   const client = input.client ?? new CanvasClient();
   const config = await loadConfig();
+  const sessionMeta: SessionMetadata = {
+    ...parseSessionMetadata(input.moduleName),
+    sessionNumber: input.sessionNumber,
+    sessionNumberPadded: String(input.sessionNumber).padStart(
+      Math.max(1, Math.trunc(config.sessions.sessionNumberPad || 2)),
+      "0"
+    )
+  };
   const headers = buildSessionHeaderTitles(input.sessionNumber, config.sessions);
   const module = await resolveModuleByName(client, input.courseId, input.moduleName);
   const moduleItems = await client.listModuleItems(input.courseId, module.id);
@@ -2542,6 +2582,12 @@ async function runSessionHeadersWorkflow(input: {
 
   const existingHeaders = headers.filter((title) => existingHeaderKeys.has(normalizeName(title)));
   const missingHeaders = headers.filter((title) => !existingHeaderKeys.has(normalizeName(title)));
+  const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
+    client,
+    courseId: input.courseId,
+    sessionMeta,
+    dryRun: input.dryRun
+  });
 
   console.log(`Module: ${module.name} (${module.id})`);
   console.log(`Session: ${String(input.sessionNumber).padStart(2, "0")}`);
@@ -2549,6 +2595,16 @@ async function runSessionHeadersWorkflow(input: {
   for (const title of headers) {
     const status = existingHeaderKeys.has(normalizeName(title)) ? " [exists]" : "";
     console.log(`- ${title}${status}`);
+  }
+  if (filesScaffoldResult) {
+    console.log(`Canvas files folders already present: ${filesScaffoldResult.existingPaths.length}`);
+    console.log(
+      `${input.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+      `${filesScaffoldResult.createdPaths.length}`
+    );
+    for (const folderPath of filesScaffoldResult.createdPaths) {
+      console.log(`+ ${folderPath}`);
+    }
   }
 
   if (input.dryRun) {
@@ -2585,6 +2641,12 @@ async function runTaskSectionWorkflow(input: {
 }): Promise<void> {
   const client = input.client ?? new CanvasClient();
   const sessionMeta = parseSessionMetadata(input.sessionName);
+  const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
+    client,
+    courseId: input.courseId,
+    sessionMeta,
+    dryRun: input.dryRun
+  });
   const taskConfig = {
     A: {
       defaultFolderName: TASK_A_DEFAULT_FOLDER_NAME,
@@ -2717,6 +2779,15 @@ async function runTaskSectionWorkflow(input: {
   console.log(`Local media files: ${assets.localMedia.length}`);
   console.log(`Media references resolved: ${mediaLookup.size}`);
   console.log(`Target module position: ${built.insertionPosition}`);
+  if (filesScaffoldResult && (input.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
+    console.log(
+      `${input.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+      `${filesScaffoldResult.createdPaths.length}`
+    );
+    for (const folderPath of filesScaffoldResult.createdPaths) {
+      console.log(`+ ${folderPath}`);
+    }
+  }
 
   if (input.dryRun) {
     if (assets.localMedia.length > 0) {
@@ -2787,6 +2858,12 @@ async function runTodaySectionWorkflow(input: {
 
   const client = input.client ?? new CanvasClient();
   const sessionMeta = parseSessionMetadata(input.sessionName);
+  const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
+    client,
+    courseId: input.courseId,
+    sessionMeta,
+    dryRun: input.dryRun
+  });
   const pageTitle = input.pageTitle ?? buildIntroductionPageTitle(input.sessionName);
 
   const assets = await prepareTodaySectionAssets({
@@ -2876,6 +2953,15 @@ async function runTodaySectionWorkflow(input: {
     console.log(`AI image brief: ${finalAiImagePrompt}`);
   }
   console.log(`Target module position: ${built.insertionPosition}`);
+  if (filesScaffoldResult && (input.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
+    console.log(
+      `${input.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+      `${filesScaffoldResult.createdPaths.length}`
+    );
+    for (const folderPath of filesScaffoldResult.createdPaths) {
+      console.log(`+ ${folderPath}`);
+    }
+  }
 
   if (input.dryRun) {
     console.log("Dry run: no Canvas updates performed.");
@@ -4858,6 +4944,13 @@ program.command("teacher-notes")
       ? `${rawPageTitle} (Draft)`
       : rawPageTitle;
     const client = new CanvasClient();
+    const sessionMeta = parseSessionMetadata(sessionName);
+    const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
+      client,
+      courseId,
+      sessionMeta,
+      dryRun: Boolean(opts.dryRun)
+    });
 
     const built = await buildTeacherNotesForSession(client, courseId, sessionName, pageTitle);
 
@@ -4867,6 +4960,15 @@ program.command("teacher-notes")
     console.log(`Source pages: ${built.modulePages.length}`);
     console.log(`Teacher notes title: ${pageTitle}`);
     console.log(`Target module position: ${built.insertionPosition}`);
+    if (filesScaffoldResult && (opts.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
+      console.log(
+        `${opts.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+        `${filesScaffoldResult.createdPaths.length}`
+      );
+      for (const folderPath of filesScaffoldResult.createdPaths) {
+        console.log(`+ ${folderPath}`);
+      }
+    }
 
     if (opts.dryRun) {
       console.log("Dry run: no Canvas updates performed.");

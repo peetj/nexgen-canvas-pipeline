@@ -3,7 +3,7 @@
     {
       "name": "Session_00",
       "children": [
-        { "name": "teacher_notes" },
+        { "name": "teachers_notes" },
         { "name": "what_are_we_doing_today" },
         { "name": "task_a" },
         { "name": "task_b" },
@@ -13,7 +13,7 @@
     {
       "name": "BONUS_Session_09",
       "children": [
-        { "name": "teacher_notes" },
+        { "name": "teachers_notes" },
         { "name": "what_are_we_doing_today" },
         { "name": "task_a" },
         { "name": "task_b" },
