@@ -29,3 +29,27 @@ Session 08: Coding + Testing
 BONUS Session 09: Applications 1
 BONUS Session 10: Applications 2
 
+
+Weekly Check In
+---------------
+1. How did today's session feel?
+
+Multichoice
+
+Very confusing
+Slightly confusing
+Kind of not confusing
+Quite clear
+Very clear
+
+2. Name one thing that you learned today.
+
+Short answer question
+
+3. Name one thing that we could have done better today.
+
+Short answer question
+
+4.This is optional but we would like you to upload a picture of something that captured the "essence" of your session. This could be a screenshot of your work or your project so far. Please do not include pictures of student faces as we cannot publish these without parental permission. Your teacher/instructor will take any such photos during the term.
+
+File Upload question

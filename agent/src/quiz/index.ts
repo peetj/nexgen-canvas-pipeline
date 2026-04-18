@@ -103,6 +103,7 @@ function buildSystemPrompt(): string {
     "All questions must be multiple_choice with exactly 4 choices.",
     "There must be exactly 5 questions with ids Q1..Q5.",
     "Use correctIndex 0..3 for the right answer.",
+    "Vary the correct answer position across the quiz. Do not put every correct answer in the same slot.",
     "Keep prompts concise and age-appropriate.",
     "If unsure, keep description and tags short."
   ].join(" ");
@@ -248,6 +249,43 @@ function sanitizeQuestions(
   return questions as SanitizedQuestion[];
 }
 
+function moveCorrectChoice(
+  question: SanitizedQuestion,
+  targetIndex: SanitizedQuestion["correctIndex"]
+): SanitizedQuestion {
+  if (question.correctIndex === targetIndex) {
+    return question;
+  }
+
+  const choices = [...question.choices];
+  const [correctChoice] = choices.splice(question.correctIndex, 1);
+  choices.splice(targetIndex, 0, correctChoice);
+
+  return {
+    ...question,
+    choices: choices as SanitizedQuestion["choices"],
+    correctIndex: targetIndex
+  };
+}
+
+function redistributeUniformCorrectIndexes(
+  questions: SanitizedQuestion[],
+  choicesPerQuestion: number
+): SanitizedQuestion[] {
+  if (questions.length < 2) return questions;
+
+  const firstCorrectIndex = questions[0]?.correctIndex;
+  if (firstCorrectIndex === undefined) return questions;
+  if (!questions.every((question) => question.correctIndex === firstCorrectIndex)) {
+    return questions;
+  }
+
+  return questions.map((question, idx) => {
+    const targetIndex = ((firstCorrectIndex + idx + 1) % choicesPerQuestion) as SanitizedQuestion["correctIndex"];
+    return moveCorrectChoice(question, targetIndex);
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method !== "POST") {
@@ -322,6 +360,10 @@ export default {
             difficulty: question.difficulty ?? requestedDifficulty
           }))
         : questions;
+    const redistributedQuestions = redistributeUniformCorrectIndexes(
+      normalizedQuestions,
+      settings.choicesPerQuestion
+    );
 
     const sanitized: Record<string, unknown> = {
       schemaVersion,
@@ -335,7 +377,7 @@ export default {
         choicesPerQuestion: settings.choicesPerQuestion,
         shuffleAnswers: settings.shuffleAnswers
       },
-      questions: normalizedQuestions,
+      questions: redistributedQuestions,
       source: {
         prompt: payload.prompt,
         generator: "cloudflare-agent",
