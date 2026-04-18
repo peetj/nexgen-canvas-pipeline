@@ -1998,7 +1998,7 @@ function buildTaskMarkdownFromNotes(input: {
     (_, tone: string, content: string) => {
       const normalizedTone = tone.toLowerCase();
       const body = stripCalloutPrefix(content, tone) || content.trim();
-      return `\n\n<p class="ng-task-callout ng-task-callout--${normalizedTone}">${escapeHtmlText(body)}</p>\n\n`;
+      return `\n\n:::${normalizedTone}\n${body.trim()}\n:::\n\n`;
     }
   );
 
