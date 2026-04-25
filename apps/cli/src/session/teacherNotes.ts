@@ -3,6 +3,11 @@ import {
   CanvasModuleItem,
   CanvasModuleSummary
 } from "../canvas/canvasClient.js";
+import {
+  generateTeacherNotesFromAgent,
+  TeacherNotesAgentInput,
+  TeacherNotesAgentOutput
+} from "../agent/teacherNotes/teacherNotesAgentClient.js";
 import { resolveModuleByName } from "./sessionHeaders.js";
 import { TEACHER_NOTES_TEMPLATE } from "./teacherNotesTemplate.js";
 
@@ -40,6 +45,8 @@ export type TeacherNotesBuildResult = {
   modulePages: SessionPageContext[];
   notesHtml: string;
   insertionPosition: number;
+  generationMode: "agent" | "heuristic";
+  generationWarning?: string;
 };
 
 const TASK_HEADER_RE = /^session\s+\d+\s*:\s*task\s+[a-z0-9]/i;
@@ -126,13 +133,32 @@ export async function buildTeacherNotesForSession(
   const coursePages = await collectCoursePages(client, courseId, pageTitle, pageCache);
   const courseInsight = buildCourseInsights(sessionName, modulePages, coursePages);
 
-  const notesHtml = renderTeacherNotesHtml(
-    pageTitle,
-    sessionName,
-    sortedItems,
-    modulePages,
-    courseInsight
-  );
+  let notesHtml: string;
+  let generationMode: "agent" | "heuristic" = "heuristic";
+  let generationWarning: string | undefined;
+
+  try {
+    const agentInput = buildTeacherNotesAgentInput(
+      pageTitle,
+      sessionName,
+      sortedItems,
+      modulePages,
+      courseInsight
+    );
+    const agentOutput = await generateTeacherNotesFromAgent(agentInput);
+    notesHtml = renderTeacherNotesHtmlFromAgent(pageTitle, agentOutput);
+    generationMode = "agent";
+  } catch (err) {
+    generationWarning = err instanceof Error ? err.message : String(err);
+    notesHtml = renderTeacherNotesHtml(
+      pageTitle,
+      sessionName,
+      sortedItems,
+      modulePages,
+      courseInsight
+    );
+  }
+
   const insertionPosition = findTeacherNotesInsertionPosition(sortedItems);
 
   return {
@@ -140,7 +166,57 @@ export async function buildTeacherNotesForSession(
     moduleItems: sortedItems,
     modulePages,
     notesHtml,
-    insertionPosition
+    insertionPosition,
+    generationMode,
+    generationWarning
+  };
+}
+
+function buildTeacherNotesAgentInput(
+  pageTitle: string,
+  sessionName: string,
+  moduleItems: CanvasModuleItem[],
+  modulePages: SessionPageContext[],
+  courseInsight: CourseInsight
+): TeacherNotesAgentInput {
+  const introPages = resolveIntroPages(moduleItems, modulePages);
+  const tasks = resolveTasks(moduleItems, modulePages);
+  const fullText = modulePages.map((page) => page.bodyText).join("\n");
+
+  return {
+    sessionName,
+    pageTitle,
+    sessionOverview:
+      buildPageExcerpt(introPages.map((page) => page.bodyText).join(" "), 3, 420) ??
+      buildPageExcerpt(fullText, 3, 420),
+    objectiveHints: buildObjectivePoints(introPages, tasks, sessionName),
+    softwareHints: detectComponents(fullText, SOFTWARE_KEYWORDS, ["Arduino IDE", "Serial Monitor"]),
+    hardwareHints: detectComponents(fullText, HARDWARE_KEYWORDS, [
+      "LCD screen module",
+      "3x4 matrix keypad",
+      "NodeMCU ESP32 board"
+    ]),
+    highlightAreaHints: courseInsight.highlightAreas,
+    commonIssueHints: buildCommonIssues(tasks, fullText, courseInsight.issueHints, sessionName).map(
+      (item) => ({
+        issue: item.issue,
+        teacherMove: item.solution
+      })
+    ),
+    taskContexts: tasks.map((task) => {
+      const differentiation = buildTaskDifferentiation(task);
+      return {
+        title: task.title,
+        pageTitles: task.pages.map((page) => page.title),
+        outcomeHint: buildTaskSummary(task),
+        pageSummaries: task.pages
+          .map((page) => buildPageExcerpt(page.bodyText))
+          .filter((summary): summary is string => Boolean(summary)),
+        reinforceHints: buildTaskPoints(task),
+        beginnerHint: differentiation.beginner,
+        extensionHint: differentiation.extension
+      };
+    })
   };
 }
 
@@ -370,6 +446,110 @@ function renderTeacherNotesHtml(
   }
   lines.push("</ul>");
   lines.push(`<p>${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.troubleshootingClose)}</p>`);
+
+  return lines.join("\n");
+}
+
+function renderTeacherNotesHtmlFromAgent(
+  pageTitle: string,
+  content: TeacherNotesAgentOutput
+): string {
+  const lines: string[] = [];
+  lines.push(`<h2>${escapeHtml(pageTitle)}</h2>`);
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mainSessionObjectiveHeading)}</h3>`);
+  lines.push(`<p>${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.sessionObjectiveLead)}</p>`);
+  lines.push("<ul>");
+  for (const point of content.sessionObjective) {
+    lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
+  }
+  lines.push("</ul>");
+  lines.push(
+    `<p><strong>Teacher focus:</strong> ${escapeHtml(content.teacherFocus ?? TEACHER_NOTES_SYSTEM_RULES.sessionTeacherFocus)}</p>`
+  );
+
+  lines.push("<hr />");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.componentsAndSoftwareHeading)}</h3>`);
+  lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.softwareLabel)}</strong></p>`);
+  lines.push("<ul>");
+  for (const item of content.software) {
+    lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
+  }
+  lines.push("</ul>");
+  lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.hardwareLabel)}</strong></p>`);
+  lines.push("<ul>");
+  for (const item of content.hardware) {
+    lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
+  }
+  lines.push("</ul>");
+
+  lines.push("<hr />");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherHighlightAreasHeading)}</h3>`);
+  lines.push("<ul>");
+  for (const highlight of content.highlightAreas) {
+    lines.push(`<li><p>${escapeHtml(highlight)}</p></li>`);
+  }
+  lines.push("</ul>");
+
+  lines.push("<hr />");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.taskGuidanceHeading)}</h3>`);
+  if (content.tasks.length === 0) {
+    lines.push("<p>No task headers were detected for this module. Add task subheaders so this section can be expanded automatically.</p>");
+  }
+  for (const task of content.tasks) {
+    lines.push(`<h4>${escapeHtml(task.title)}</h4>`);
+    if (task.outcome) {
+      lines.push(`<p>${escapeHtml(task.outcome)}</p>`);
+    }
+    if (task.reinforce.length > 0) {
+      lines.push(`<p>${escapeHtml(TEACHER_NOTES_TEMPLATE.reinforceLabel)}</p>`);
+      lines.push("<ul>");
+      for (const point of task.reinforce) {
+        lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
+      }
+      lines.push("</ul>");
+    }
+    if (task.goldenNuggets.length > 0) {
+      lines.push(`<p>${escapeHtml(TEACHER_NOTES_TEMPLATE.goldenNuggetsLabel)}</p>`);
+      lines.push("<ul>");
+      for (const nugget of task.goldenNuggets) {
+        lines.push(`<li><p>${escapeHtml(nugget)}</p></li>`);
+      }
+      lines.push("</ul>");
+    }
+    if (task.beginner || task.extension) {
+      lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.differentiationLabel)}</strong></p>`);
+      lines.push("<ul>");
+      if (task.beginner) {
+        lines.push(
+          `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.beginnersLabel)}</strong> ${escapeHtml(task.beginner)}</p></li>`
+        );
+      }
+      if (task.extension) {
+        lines.push(
+          `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.extensionLabel)}</strong> ${escapeHtml(task.extension)}</p></li>`
+        );
+      }
+      lines.push("</ul>");
+    }
+  }
+
+  lines.push("<hr />");
+  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mostCommonIssuesHeading)}</h3>`);
+  lines.push("<ul>");
+  for (const issue of content.commonIssues) {
+    lines.push("<li>");
+    lines.push(`<p>${escapeHtml(issue.issue)}</p>`);
+    lines.push("<ul>");
+    lines.push(
+      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherMoveLabel)}</strong> ${escapeHtml(issue.teacherMove)}</p></li>`
+    );
+    lines.push("</ul>");
+    lines.push("</li>");
+  }
+  lines.push("</ul>");
+  lines.push(
+    `<p>${escapeHtml(content.troubleshootingClose ?? TEACHER_NOTES_SYSTEM_RULES.troubleshootingClose)}</p>`
+  );
 
   return lines.join("\n");
 }
@@ -764,6 +944,26 @@ function firstSentence(text: string): string | undefined {
   return fallback.length ? `${fallback}.` : undefined;
 }
 
+function buildPageExcerpt(
+  text: string,
+  maxSentences = 2,
+  maxChars = 320
+): string | undefined {
+  const normalized = text.replace(SPACE_RE, " ").trim();
+  if (!normalized) return undefined;
+
+  const sentences = normalized
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => cleanupSentence(sentence))
+    .filter((sentence) => sentence.length >= 20);
+
+  if (sentences.length === 0) {
+    return truncateText(cleanupSentence(normalized), maxChars);
+  }
+
+  return truncateText(sentences.slice(0, maxSentences).join(" "), maxChars);
+}
+
 function toPlainText(html: string): string {
   const noTags = html
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -821,6 +1021,11 @@ function cleanupSentence(input: string): string {
     .replace(/^(the task|task|keypad circuit)\s*[:\-]?\s*/i, "")
     .replace(SPACE_RE, " ")
     .trim();
+}
+
+function truncateText(input: string, maxChars: number): string {
+  if (input.length <= maxChars) return input;
+  return `${input.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
 }
 
 function toOutcomeBullet(input: string): string {

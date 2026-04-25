@@ -7,7 +7,9 @@ export const TEACHER_NOTES_TEMPLATE = {
   softwareLabel: "Software:",
   hardwareLabel: "Hardware:",
   reinforceLabel: "Key points to reinforce:",
+  goldenNuggetsLabel: "Golden nuggets:",
   differentiationLabel: "Differentiation:",
   beginnersLabel: "Beginners (Year 7):",
-  extensionLabel: "Extension (confident students / Year 10):"
+  extensionLabel: "Extension (confident students / Year 10):",
+  teacherMoveLabel: "Teacher move:"
 } as const;

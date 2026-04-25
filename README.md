@@ -11,7 +11,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 ## Setup
 1. Install Node.js 18+.
 2. Copy .env.example to .env and fill values.
-   - Configure `CANVAS_AGENT_URL` (single worker base URL). CLI derives `/generate-quiz`, `/today-intro`, and `/task-a-content`.
+   - Configure `CANVAS_AGENT_URL` (single worker base URL). CLI derives `/generate-quiz`, `/today-intro`, `/task-a-content`, and `/teacher-notes`.
 3. Install deps:
    npm install
 
@@ -24,6 +24,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 - `agent/src/quiz`: Cloudflare quiz generator endpoint (`/generate-quiz`)
 - `agent/src/todayIntro`: Cloudflare intro rewrite endpoint for `today-section` (`/today-intro`)
 - `agent/src/taskA`: Cloudflare Task A enrichment endpoint for task pages (`/task-a-content`)
+- `agent/src/teacherNotes`: Cloudflare teacher-notes enrichment endpoint (`/teacher-notes`)
 
 ## Command Summary
 ### Main CLI (`apps/cli/src/cli.ts`)
@@ -223,6 +224,7 @@ Generate teacher notes from existing session content.
 Behavior notes:
 - Uses whole-course session content (not just the target session module) to infer recurring teacher watchpoints.
 - Uses a strict heading template from `apps/cli/src/session/teacherNotesTemplate.ts`, including a guaranteed `Most Common Issues` section.
+- Prefers the `teacher-notes` agent route for tighter teacher-facing guidance and falls back to the legacy heuristic generator if the route is unavailable.
 
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.

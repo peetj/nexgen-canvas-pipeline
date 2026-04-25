@@ -4959,6 +4959,10 @@ program.command("teacher-notes")
     console.log(`Mode: ${isDraftMode ? "draft" : "live"}`);
     console.log(`Source pages: ${built.modulePages.length}`);
     console.log(`Teacher notes title: ${pageTitle}`);
+    console.log(`Generation mode: ${built.generationMode}`);
+    if (built.generationWarning) {
+      console.log(`Generation fallback reason: ${built.generationWarning}`);
+    }
     console.log(`Target module position: ${built.insertionPosition}`);
     if (filesScaffoldResult && (opts.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
       console.log(
