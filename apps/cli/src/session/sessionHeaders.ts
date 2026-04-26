@@ -61,3 +61,36 @@ export async function resolveModuleByName(
   const suggestions = modules.map((m) => m.name).join(", ");
   throw new Error(`No exact module name match for "${moduleName}". Closest matches: ${suggestions}`);
 }
+
+export async function ensureModuleByName(
+  client: CanvasClient,
+  courseId: number,
+  moduleName: string,
+  options?: { position?: number }
+): Promise<{ module: ModuleSummary; created: boolean }> {
+  const target = normalizeName(moduleName);
+  if (!target) {
+    throw new Error("Module name is required.");
+  }
+
+  const modules = await client.listModules(courseId, moduleName);
+  const matches = modules.filter((m) => normalizeName(m.name) === target);
+
+  if (matches.length === 1) {
+    return { module: matches[0], created: false };
+  }
+
+  if (matches.length > 1) {
+    const names = matches.map((m) => m.name).join(", ");
+    throw new Error(`Multiple modules matched "${moduleName}": ${names}`);
+  }
+
+  const created = await client.createModule(courseId, {
+    name: moduleName,
+    position: options?.position
+  });
+  return {
+    module: created,
+    created: true
+  };
+}

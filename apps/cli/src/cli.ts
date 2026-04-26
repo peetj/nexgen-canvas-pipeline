@@ -1,16 +1,19 @@
 import { Command } from "commander";
+import { marked } from "marked";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { env } from "./env.js";
 import { validateNexgenQuiz } from "./quiz/schema/validate.js";
+import { validateNexgenSurvey } from "./survey/schema/validate.js";
 import { CanvasClient } from "./canvas/canvasClient.js";
-import type { CanvasFolder } from "./canvas/canvasClient.js";
+import type { CanvasFolder, CanvasModuleItem, CanvasModuleSummary } from "./canvas/canvasClient.js";
 import { mapToCanvasQuiz } from "./quiz/quizMapper.js";
+import { mapToCanvasSurvey } from "./survey/surveyMapper.js";
 import { generateQuizFromAgent } from "./agent/quiz/quizAgentClient.js";
 import type { QuizDifficulty } from "./agent/quiz/quizAgentClient.js";
 import { generateTodayIntroFromAgent } from "./agent/sessionIntro/todayIntroAgentClient.js";
-import { buildSessionHeaderTitles, resolveModuleByName } from "./session/sessionHeaders.js";
+import { buildSessionHeaderTitles, ensureModuleByName, resolveModuleByName } from "./session/sessionHeaders.js";
 import { buildTeacherNotesForSession } from "./session/teacherNotes.js";
 import {
   buildTaskASection,
@@ -46,11 +49,13 @@ const ANSWER_READ_ONLY_FIELDS = new Set([
 ]);
 const TODAY_SECTION_ASSET_TITLE = "What we are doing Today";
 const TASK_A_DEFAULT_FOLDER_NAME = "Task A";
-const TASK_B_DEFAULT_FOLDER_NAME = "TaskB";
-const TASK_C_DEFAULT_FOLDER_NAME = "TaskC";
+const TASK_B_DEFAULT_FOLDER_NAME = "Task B";
+const TASK_C_DEFAULT_FOLDER_NAME = "Task C";
 const NOTE_PLACEHOLDER_TOKEN = "[ADD NOTES]";
 const AI_PROMPT_PLACEHOLDER_TOKEN = "[ADD AI IMAGE PROMPT]";
 const IMAGE_URL_PLACEHOLDER_TOKEN = "https://example.com/your-image.jpg";
+const IMAGE_FILE_PLACEHOLDER_TOKEN = "images/your-image.jpg";
+const QUIZ_PROMPT_PLACEHOLDER_TOKEN = "[ADD QUIZ PROMPT]";
 const TASK_A_DEFAULT_PHILOSOPHY_TEXT =
   "Task A builds core confidence first: complete the essentials clearly and safely before moving into extension complexity.";
 
@@ -84,21 +89,26 @@ function parseQuizDifficulty(input: string, fieldName: string): QuizDifficulty {
   throw new Error(`Invalid ${fieldName}. Use one of: easy, medium, hard, mixed.`);
 }
 
+const SESSION_FILES_CHILD_FOLDER_NAMES = [
+  "teachers_notes",
+  "what_are_we_doing_today",
+  "task_a",
+  "task_b",
+  "task_c"
+] as const;
+
+function buildCanvasSessionFilesFolderNode(sessionFolderName: string): CanvasFolderNode {
+  return {
+    name: sessionFolderName,
+    children: SESSION_FILES_CHILD_FOLDER_NAMES.map((child) => ({ name: child }))
+  };
+}
+
 function buildDefaultCanvasCourseFilesStructure(): CanvasFolderNode[] {
-  const childNames = [
-    "teacher_notes",
-    "what_are_we_doing_today",
-    "task_a",
-    "task_b",
-    "task_c"
-  ];
   const standardSessions = Array.from({ length: 9 }, (_, idx) => `Session_${String(idx).padStart(2, "0")}`);
   const bonusSessions = ["BONUS_Session_09", "BONUS_Session_10"];
 
-  return [...standardSessions, ...bonusSessions].map((name) => ({
-    name,
-    children: childNames.map((child) => ({ name: child }))
-  }));
+  return [...standardSessions, ...bonusSessions].map((name) => buildCanvasSessionFilesFolderNode(name));
 }
 
 function parseCanvasFolderStructureInput(input: unknown): CanvasFolderNode[] {
@@ -328,7 +338,11 @@ function sanitizeQuestionForCreate(raw: unknown): Record<string, unknown> {
 
 function buildQuizCloneInput(
   sourceQuiz: Record<string, unknown>,
-  title: string
+  title: string,
+  options?: {
+    preserveAssignmentGroup?: boolean;
+    preserveAvailabilityDates?: boolean;
+  }
 ): {
   title: string;
   description?: string;
@@ -350,6 +364,8 @@ function buildQuizCloneInput(
   lock_questions_after_answering?: boolean;
   hide_results?: string;
 } {
+  const preserveAssignmentGroup = options?.preserveAssignmentGroup ?? true;
+  const preserveAvailabilityDates = options?.preserveAvailabilityDates ?? true;
   return {
     title,
     description: typeof sourceQuiz.description === "string" ? sourceQuiz.description : undefined,
@@ -358,7 +374,9 @@ function buildQuizCloneInput(
     time_limit: typeof sourceQuiz.time_limit === "number" ? sourceQuiz.time_limit : undefined,
     allowed_attempts: typeof sourceQuiz.allowed_attempts === "number" ? sourceQuiz.allowed_attempts : undefined,
     assignment_group_id:
-      typeof sourceQuiz.assignment_group_id === "number" ? sourceQuiz.assignment_group_id : undefined,
+      preserveAssignmentGroup && typeof sourceQuiz.assignment_group_id === "number"
+        ? sourceQuiz.assignment_group_id
+        : undefined,
     shuffle_answers: typeof sourceQuiz.shuffle_answers === "boolean" ? sourceQuiz.shuffle_answers : undefined,
     show_correct_answers:
       typeof sourceQuiz.show_correct_answers === "boolean" ? sourceQuiz.show_correct_answers : undefined,
@@ -368,9 +386,12 @@ function buildQuizCloneInput(
     cant_go_back: typeof sourceQuiz.cant_go_back === "boolean" ? sourceQuiz.cant_go_back : undefined,
     access_code: typeof sourceQuiz.access_code === "string" ? sourceQuiz.access_code : undefined,
     ip_filter: typeof sourceQuiz.ip_filter === "string" ? sourceQuiz.ip_filter : undefined,
-    due_at: typeof sourceQuiz.due_at === "string" ? sourceQuiz.due_at : undefined,
-    lock_at: typeof sourceQuiz.lock_at === "string" ? sourceQuiz.lock_at : undefined,
-    unlock_at: typeof sourceQuiz.unlock_at === "string" ? sourceQuiz.unlock_at : undefined,
+    due_at:
+      preserveAvailabilityDates && typeof sourceQuiz.due_at === "string" ? sourceQuiz.due_at : undefined,
+    lock_at:
+      preserveAvailabilityDates && typeof sourceQuiz.lock_at === "string" ? sourceQuiz.lock_at : undefined,
+    unlock_at:
+      preserveAvailabilityDates && typeof sourceQuiz.unlock_at === "string" ? sourceQuiz.unlock_at : undefined,
     lock_questions_after_answering:
       typeof sourceQuiz.lock_questions_after_answering === "boolean"
         ? sourceQuiz.lock_questions_after_answering
@@ -379,13 +400,91 @@ function buildQuizCloneInput(
   };
 }
 
+async function findExactQuizByTitleIfExists(
+  client: CanvasClient,
+  courseId: number,
+  quizTitle: string
+): Promise<Awaited<ReturnType<CanvasClient["listQuizzes"]>>[number] | undefined> {
+  const matches = (await client.listQuizzes(courseId, quizTitle)).filter(
+    (quiz) => normalizeName(quiz.title) === normalizeName(quizTitle)
+  );
+  if (matches.length > 1) {
+    const names = matches.map((quiz) => `${quiz.title} (${quiz.id})`).join(", ");
+    throw new Error(`Multiple quizzes matched "${quizTitle}" in course ${courseId}: ${names}`);
+  }
+  return matches[0];
+}
+
+async function resolveExactQuizCloneSource(input: {
+  client: CanvasClient;
+  sourceCourseId: number;
+  sourceTitle: string;
+}): Promise<{
+  summary: Awaited<ReturnType<CanvasClient["listQuizzes"]>>[number];
+  quiz: Awaited<ReturnType<CanvasClient["getQuiz"]>>;
+  questions: Awaited<ReturnType<CanvasClient["listQuizQuestions"]>>;
+}> {
+  const sourceCandidates = await input.client.listQuizzes(input.sourceCourseId, input.sourceTitle);
+  const sourceMatches = sourceCandidates.filter(
+    (quiz) => normalizeName(quiz.title) === normalizeName(input.sourceTitle)
+  );
+  if (sourceMatches.length === 0) {
+    const suggestions = sourceCandidates.map((quiz) => quiz.title).join(", ");
+    if (!suggestions) {
+      throw new Error(
+        `No quizzes found in source course ${input.sourceCourseId} matching "${input.sourceTitle}".`
+      );
+    }
+    throw new Error(
+      `No exact source quiz match for "${input.sourceTitle}" in course ${input.sourceCourseId}. Closest matches: ${suggestions}`
+    );
+  }
+  if (sourceMatches.length > 1) {
+    const names = sourceMatches.map((quiz) => `${quiz.title} (${quiz.id})`).join(", ");
+    throw new Error(`Multiple source quizzes matched "${input.sourceTitle}": ${names}`);
+  }
+
+  const summary = sourceMatches[0];
+  const quiz = await input.client.getQuiz(input.sourceCourseId, summary.id);
+  const questions = await input.client.listQuizQuestions(input.sourceCourseId, summary.id);
+  return { summary, quiz, questions };
+}
+
+async function cloneQuizToCourse(input: {
+  client: CanvasClient;
+  sourceCourseId: number;
+  targetCourseId: number;
+  sourceQuiz: Awaited<ReturnType<CanvasClient["getQuiz"]>>;
+  sourceQuestions: Awaited<ReturnType<CanvasClient["listQuizQuestions"]>>;
+  title: string;
+}): Promise<{ id: number; title: string; html_url?: string }> {
+  const preserveCourseScopedFields = input.sourceCourseId === input.targetCourseId;
+  const created = await input.client.createQuiz(
+    input.targetCourseId,
+    buildQuizCloneInput(input.sourceQuiz as Record<string, unknown>, input.title, {
+      preserveAssignmentGroup: preserveCourseScopedFields,
+      preserveAvailabilityDates: preserveCourseScopedFields
+    })
+  );
+
+  for (const sourceQuestion of input.sourceQuestions) {
+    await input.client.addQuizQuestion(
+      input.targetCourseId,
+      created.id,
+      sanitizeQuestionForCreate(sourceQuestion)
+    );
+  }
+
+  return created;
+}
+
 type TodaySectionAssets = {
   folderPath: string;
   notesText?: string;
   imageUrl?: string;
   aiImagePrompt?: string;
   createdFiles: string[];
-  imageSource: "local-file" | "cli-url" | "file-url" | "canvas-file-id" | "none";
+  imageSource: "local-file" | "cli-url" | "notes-url" | "canvas-file-id" | "none";
   canvasImageId?: number;
   canvasImageDisplayName?: string;
   localImagePath?: string;
@@ -441,6 +540,148 @@ type CanvasFolderNode = {
 type CanvasFolderStructureFile = {
   folders?: unknown;
 };
+
+type UpsertCoursePageResult = {
+  pageUrl: string;
+  createdPage: boolean;
+};
+
+type EnsureModulePagePlacementResult = {
+  createdModuleItem: boolean;
+  movedModuleItem: boolean;
+};
+
+type OrchestratorBlueprint = {
+  schemaVersion: "course-orchestrator.v1" | "course-orchestrator.v2";
+  modules: OrchestratorModuleSpec[];
+};
+
+type PreparedTodaySectionStepInput = {
+  notesText?: string;
+  notesFilePath?: string;
+  imageUrl?: string;
+  imageId?: number;
+  imageFilePath?: string;
+  aiImagePrompt?: string;
+};
+
+type PreparedTaskSectionStepInput = {
+  notesText?: string;
+  notesFilePath?: string;
+};
+
+type PreparedCreateQuizStepInput = {
+  quizFilePath?: string;
+  promptText?: string;
+  promptFilePath?: string;
+  difficulty?: QuizDifficulty;
+};
+
+type OrchestratorModuleSpec = {
+  name: string;
+  sessionNumber?: number;
+  position?: number;
+  steps: OrchestratorStep[];
+};
+
+type OrchestratorModuleTemplateSpec = {
+  name: string;
+  position?: number;
+  steps: OrchestratorStep[];
+};
+
+type OrchestratorTemplateSessionSpec = {
+  sessionNumber: number;
+  topic: string;
+  position?: number;
+  variables?: Record<string, string>;
+};
+
+type OrchestratorSessionHeadersStep = {
+  type: "session-headers";
+  sessionNumber?: number;
+};
+
+type OrchestratorSubheaderStep = {
+  type: "subheader";
+  title: string;
+};
+
+type OrchestratorPageContentBlock =
+  | { type: "markdown"; value: string }
+  | { type: "markdownFile"; path: string }
+  | { type: "html"; value: string }
+  | { type: "htmlFile"; path: string }
+  | { type: "imageFile"; path: string; alt?: string; filesFolder: string };
+
+type OrchestratorPageStep = {
+  type: "page";
+  title: string;
+  publish?: boolean;
+  afterHeaderTitle?: string;
+  content: OrchestratorPageContentBlock[];
+};
+
+type OrchestratorTodaySectionStep = {
+  type: "today-section";
+  pageTitle?: string;
+  notes?: string;
+  notesFile?: string;
+  imageUrl?: string;
+  imageId?: number;
+  imageFile?: string;
+  aiImagePrompt?: string;
+  publish?: boolean;
+};
+
+type OrchestratorTaskSectionStep = {
+  type: "task-a-section" | "task-b-section" | "task-c-section";
+  taskFolder?: string;
+  pageTitle?: string;
+  notes?: string;
+  notesFile?: string;
+  publish?: boolean;
+};
+
+type OrchestratorCloneSurveyStep = {
+  type: "clone-survey";
+  sourceTitle: string;
+  title: string;
+  sourceCourseId?: number;
+  afterHeaderTitle?: string;
+  skipExisting?: boolean;
+};
+
+type OrchestratorCreateSurveyStep = {
+  type: "create-survey";
+  fromFile: string;
+  title?: string;
+  afterHeaderTitle?: string;
+  skipExisting?: boolean;
+  publish?: boolean;
+};
+
+type OrchestratorCreateQuizStep = {
+  type: "create-quiz";
+  title?: string;
+  fromFile?: string;
+  prompt?: string;
+  promptFile?: string;
+  difficulty?: QuizDifficulty;
+  afterHeaderTitle?: string;
+  skipExisting?: boolean;
+  publish?: boolean;
+};
+
+type OrchestratorStep =
+  | OrchestratorSessionHeadersStep
+  | OrchestratorSubheaderStep
+  | OrchestratorPageStep
+  | OrchestratorTodaySectionStep
+  | OrchestratorTaskSectionStep
+  | OrchestratorCloneSurveyStep
+  | OrchestratorCreateSurveyStep
+  | OrchestratorCreateQuizStep;
 const LOCAL_VIDEO_EXTENSIONS = new Set([
   ".mp4",
   ".webm",
@@ -452,6 +693,9 @@ const TASK_A_TEMPLATE_FILE_NAMES = new Set(["notes.md"]);
 const MAX_LOCAL_IMAGE_BYTES = 450 * 1024;
 const LOCAL_IMAGE_WEBP_WIDTHS = [1920, 1600, 1366, 1280, 1024, 900, 768, 640];
 const LOCAL_IMAGE_WEBP_QUALITIES = [82, 76, 70, 64, 58, 52, 46];
+const QUIZ_SECTION_ASSET_TITLE = "QUIZ";
+const QUIZ_PROMPT_FILE_NAME = "prompt.md";
+const MODULE_ITEM_DEFAULT_INDENT = 1;
 
 function toFilesystemSegment(input: string): string {
   const cleaned = input
@@ -460,6 +704,51 @@ function toFilesystemSegment(input: string): string {
     .trim();
   if (!cleaned) return "untitled";
   return cleaned;
+}
+
+function deriveCourseScopedSessionAssetsRoot(blueprintFilePath: string): string {
+  const courseFolderName = toFilesystemSegment(path.basename(path.dirname(path.resolve(blueprintFilePath))));
+  return path.resolve(process.cwd(), "apps", "cli", "session-assets", courseFolderName);
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (err) {
+    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+async function resolveOrchestratorContentPath(input: {
+  filePath: string;
+  assetsRoot: string;
+  blueprintDir: string;
+}): Promise<string> {
+  const rawPath = input.filePath.trim();
+  if (rawPath.length === 0) {
+    throw new Error("Encountered an empty orchestrator content path.");
+  }
+
+  const candidates = path.isAbsolute(rawPath)
+    ? [path.resolve(rawPath)]
+    : [path.resolve(input.assetsRoot, rawPath), path.resolve(input.blueprintDir, rawPath)];
+
+  for (const candidate of candidates) {
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (path.isAbsolute(rawPath)) {
+    throw new Error(`Could not find orchestrator content file "${rawPath}".`);
+  }
+
+  throw new Error(
+    `Could not resolve orchestrator content path "${input.filePath}" in "${input.assetsRoot}" or "${input.blueprintDir}".`
+  );
 }
 
 function parseSessionMetadata(sessionName: string): SessionMetadata {
@@ -482,14 +771,41 @@ function buildIntroductionPageTitle(sessionName: string): string {
   return `Introduction: ${meta.topic}`;
 }
 
-function buildCanvasSectionFilesFolderPath(
-  sessionMeta: SessionMetadata,
-  sectionFolderName: string
+function buildCanvasSessionFilesRootFolderName(
+  sessionMeta: Pick<SessionMetadata, "sessionNumberPadded">
 ): string {
   if (!sessionMeta.sessionNumberPadded) {
     throw new Error("Session number is required to build a Canvas Files folder path.");
   }
-  return `Session_${sessionMeta.sessionNumberPadded}/${sectionFolderName}`;
+  return `Session_${sessionMeta.sessionNumberPadded}`;
+}
+
+function buildCanvasSectionFilesFolderPath(
+  sessionMeta: SessionMetadata,
+  sectionFolderName: string
+): string {
+  return `${buildCanvasSessionFilesRootFolderName(sessionMeta)}/${sectionFolderName}`;
+}
+
+async function ensureCanvasSessionFilesFolders(input: {
+  client: CanvasClient;
+  courseId: number;
+  sessionMeta: SessionMetadata;
+  dryRun: boolean;
+}): Promise<{
+  createdPaths: string[];
+  existingPaths: string[];
+} | undefined> {
+  if (!input.sessionMeta.sessionNumberPadded) {
+    return undefined;
+  }
+
+  return ensureCanvasFolderTree({
+    client: input.client,
+    courseId: input.courseId,
+    folders: [buildCanvasSessionFilesFolderNode(buildCanvasSessionFilesRootFolderName(input.sessionMeta))],
+    dryRun: input.dryRun
+  });
 }
 
 async function ensureFileWithTemplate(filePath: string, content: string): Promise<boolean> {
@@ -522,6 +838,70 @@ function normalizeNotesText(input: string | undefined): string | undefined {
   return normalized;
 }
 
+function normalizeQuizPromptText(input: string | undefined): string | undefined {
+  if (!input) return undefined;
+  const normalized = input.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return undefined;
+  if (normalized.toLowerCase().includes(QUIZ_PROMPT_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
+  return normalized;
+}
+
+function parseTodaySectionFrontmatter(raw: string): {
+  body: string;
+  pageTitle?: string;
+  imageFile?: string;
+  imageUrl?: string;
+  aiImagePrompt?: string;
+} {
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const match = normalized.match(/^---\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
+  if (!match) {
+    return { body: normalized };
+  }
+
+  const frontmatterText = match[1];
+  const body = normalized.slice(match[0].length).replace(/^\n+/, "");
+  let pageTitle: string | undefined;
+  let imageFile: string | undefined;
+  let imageUrl: string | undefined;
+  let aiImagePrompt: string | undefined;
+
+  for (const rawLine of frontmatterText.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const keyValueMatch = line.match(/^([A-Za-z0-9_]+):(?:\s*(.*))?$/);
+    if (!keyValueMatch) continue;
+
+    const key = keyValueMatch[1];
+    const value = stripMatchingQuotes((keyValueMatch[2] ?? "").trim());
+
+    if (key === "pageTitle" && value) {
+      pageTitle = value;
+      continue;
+    }
+    if (key === "imageFile" && value) {
+      imageFile = value;
+      continue;
+    }
+    if (key === "imageUrl" && value) {
+      imageUrl = value;
+      continue;
+    }
+    if (key === "aiImagePrompt" && value) {
+      aiImagePrompt = value;
+    }
+  }
+
+  return {
+    body,
+    pageTitle,
+    imageFile,
+    imageUrl,
+    aiImagePrompt
+  };
+}
+
 function normalizeSingleLineInput(input: string | undefined): string | undefined {
   if (!input) return undefined;
   const normalized = input
@@ -535,6 +915,137 @@ function normalizeSingleLineInput(input: string | undefined): string | undefined
   if (lower.includes(AI_PROMPT_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
   if (lower.includes(IMAGE_URL_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
   return normalized;
+}
+
+function normalizeTodaySectionImageFileInput(input: string | undefined): string | undefined {
+  if (!input) return undefined;
+  const normalized = input
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !line.startsWith("#"));
+  if (!normalized) return undefined;
+  if (normalized.toLowerCase().includes(IMAGE_FILE_PLACEHOLDER_TOKEN.toLowerCase())) return undefined;
+  return normalized;
+}
+
+function buildTodaySectionNotesTemplate(bodyText?: string): string {
+  const body = (bodyText ?? `${NOTE_PLACEHOLDER_TOKEN}
+
+Write one or two short paragraphs that explain what students are doing in this session.`).trim();
+  return [
+    "---",
+    `imageFile: ${JSON.stringify(IMAGE_FILE_PLACEHOLDER_TOKEN)}`,
+    `imageUrl: ${JSON.stringify(IMAGE_URL_PLACEHOLDER_TOKEN)}`,
+    `aiImagePrompt: ${JSON.stringify(AI_PROMPT_PLACEHOLDER_TOKEN)}`,
+    "---",
+    "",
+    body,
+    ""
+  ].join("\n");
+}
+
+function buildQuizPromptTemplate(sessionName: string): string {
+  const meta = parseSessionMetadata(sessionName);
+  return `${QUIZ_PROMPT_PLACEHOLDER_TOKEN}
+
+Create a five-question multiple-choice quiz for ${sessionName}.
+Focus on the key concepts students should retain from ${meta.topic}.
+Target Year 7-10 and return concise, student-friendly questions.`;
+}
+
+function renderTodaySectionNotesFile(input: {
+  body: string;
+  pageTitle?: string;
+  imageFile?: string;
+  imageUrl?: string;
+  aiImagePrompt?: string;
+}): string {
+  const frontmatterLines = ["---"];
+  if (input.pageTitle?.trim()) {
+    frontmatterLines.push(`pageTitle: ${JSON.stringify(input.pageTitle.trim())}`);
+  }
+  frontmatterLines.push(
+    `imageFile: ${JSON.stringify((input.imageFile?.trim() || IMAGE_FILE_PLACEHOLDER_TOKEN))}`,
+    `imageUrl: ${JSON.stringify((input.imageUrl?.trim() || IMAGE_URL_PLACEHOLDER_TOKEN))}`,
+    `aiImagePrompt: ${JSON.stringify((input.aiImagePrompt?.trim() || AI_PROMPT_PLACEHOLDER_TOKEN))}`,
+    "---",
+    "",
+    input.body.trim(),
+    ""
+  );
+  return frontmatterLines.join("\n");
+}
+
+async function findOptionalNotesImageFile(folderPath: string, requestedPath?: string): Promise<string | undefined> {
+  const normalized = normalizeTodaySectionImageFileInput(requestedPath);
+  if (!normalized) return undefined;
+  try {
+    return await findLocalImageFile(folderPath, normalized);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("was not found")) {
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+async function removeFileIfExists(filePath: string): Promise<void> {
+  try {
+    await fs.rm(filePath, { force: true });
+  } catch (err) {
+    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+    if (code === "ENOENT") return;
+    throw err;
+  }
+}
+
+async function prepareQuizAssets(input: {
+  assetsRoot: string;
+  sessionName: string;
+  promptText?: string;
+  promptFilePath?: string;
+}): Promise<{
+  folderPath: string;
+  promptPath: string;
+  promptText?: string;
+  createdFiles: string[];
+}> {
+  const folderPath = path.resolve(
+    input.assetsRoot,
+    toFilesystemSegment(input.sessionName),
+    toFilesystemSegment(QUIZ_SECTION_ASSET_TITLE)
+  );
+  await fs.mkdir(folderPath, { recursive: true });
+
+  const promptPath = path.resolve(folderPath, QUIZ_PROMPT_FILE_NAME);
+  const createdFiles: string[] = [];
+  if (await ensureFileWithTemplate(promptPath, `${buildQuizPromptTemplate(input.sessionName)}\n`)) {
+    createdFiles.push(promptPath);
+  }
+
+  let authoredPromptTextFromInput: string | undefined;
+  if (input.promptText) {
+    authoredPromptTextFromInput = input.promptText.replace(/\r\n/g, "\n").trim();
+  } else if (input.promptFilePath) {
+    authoredPromptTextFromInput = await fs.readFile(path.resolve(input.promptFilePath), "utf8");
+  }
+
+  if (authoredPromptTextFromInput !== undefined) {
+    await fs.writeFile(promptPath, `${authoredPromptTextFromInput.trimEnd()}\n`, "utf8");
+  }
+
+  const promptText = normalizeQuizPromptText(
+    authoredPromptTextFromInput ?? (await readTextIfExists(promptPath))
+  );
+
+  return {
+    folderPath,
+    promptPath,
+    promptText,
+    createdFiles
+  };
 }
 
 function normalizeTaskInlineInput(input: string | undefined): string | undefined {
@@ -900,35 +1411,51 @@ async function prepareTodaySectionAssets(input: {
     toFilesystemSegment(input.sectionTitle)
   );
   await fs.mkdir(folderPath, { recursive: true });
+  await fs.mkdir(path.resolve(folderPath, "images"), { recursive: true });
 
   const notesPath = path.resolve(folderPath, "notes.md");
   const imageUrlPath = path.resolve(folderPath, "image-url.txt");
   const aiPromptPath = path.resolve(folderPath, "ai-image-prompt.txt");
 
   const createdFiles: string[] = [];
-  const notesTemplate = `${NOTE_PLACEHOLDER_TOKEN}
-
-Write one or two short paragraphs that explain what students are doing in this session.
-`;
-  const imageTemplate = `${IMAGE_URL_PLACEHOLDER_TOKEN}
-`;
-  const aiPromptTemplate = `${AI_PROMPT_PLACEHOLDER_TOKEN}
-`;
+  const notesTemplate = buildTodaySectionNotesTemplate();
 
   if (await ensureFileWithTemplate(notesPath, notesTemplate)) createdFiles.push(notesPath);
-  if (await ensureFileWithTemplate(imageUrlPath, imageTemplate)) createdFiles.push(imageUrlPath);
-  if (await ensureFileWithTemplate(aiPromptPath, aiPromptTemplate)) createdFiles.push(aiPromptPath);
 
-  let notesText = normalizeNotesText(input.notesText);
-  if (!notesText && input.notesFilePath) {
-    const loaded = await fs.readFile(path.resolve(input.notesFilePath), "utf8");
-    notesText = normalizeNotesText(loaded);
+  let authoredNotesTextFromInput: string | undefined;
+  if (input.notesText) {
+    authoredNotesTextFromInput = input.notesText.replace(/\r\n/g, "\n").trim();
+  } else if (input.notesFilePath) {
+    authoredNotesTextFromInput = await fs.readFile(path.resolve(input.notesFilePath), "utf8");
   }
-  if (!notesText) {
-    notesText = normalizeNotesText(await readTextIfExists(notesPath));
-  } else {
-    await fs.writeFile(notesPath, `${notesText}\n`, "utf8");
+
+  const authoredNotesText = authoredNotesTextFromInput ?? (await readTextIfExists(notesPath));
+  const parsedNotes = authoredNotesText ? parseTodaySectionFrontmatter(authoredNotesText) : { body: "" };
+  const notesText = normalizeNotesText(parsedNotes.body);
+  const legacyImageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
+  const legacyAiImagePrompt = normalizeSingleLineInput(await readTextIfExists(aiPromptPath));
+  const configuredImageFile = normalizeTodaySectionImageFileInput(parsedNotes.imageFile);
+  const configuredImageUrl = normalizeSingleLineInput(input.imageUrl) ??
+    normalizeSingleLineInput(parsedNotes.imageUrl) ??
+    legacyImageUrl;
+  const configuredAiImagePrompt = normalizeSingleLineInput(input.aiImagePrompt) ??
+    normalizeSingleLineInput(parsedNotes.aiImagePrompt) ??
+    legacyAiImagePrompt;
+  const bodyForWrite = parsedNotes.body.trim() || `${NOTE_PLACEHOLDER_TOKEN}
+
+Write one or two short paragraphs that explain what students are doing in this session.`;
+  const normalizedNotesFile = renderTodaySectionNotesFile({
+    body: bodyForWrite,
+    pageTitle: parsedNotes.pageTitle,
+    imageFile: input.imageFilePath ?? configuredImageFile,
+    imageUrl: configuredImageUrl,
+    aiImagePrompt: configuredAiImagePrompt
+  });
+  if (authoredNotesTextFromInput !== undefined || normalizedNotesFile !== `${(authoredNotesText ?? "").replace(/\r\n/g, "\n").trimEnd()}\n`) {
+    await fs.writeFile(notesPath, normalizedNotesFile, "utf8");
   }
+  await removeFileIfExists(imageUrlPath);
+  await removeFileIfExists(aiPromptPath);
 
   let imageUrl: string | undefined;
   let imageSource: TodaySectionAssets["imageSource"] = "none";
@@ -954,12 +1481,17 @@ Write one or two short paragraphs that explain what students are doing in this s
     canvasImageDisplayName = canvasFile.display_name ?? canvasFile.filename;
     imageSource = "canvas-file-id";
   } else {
-    localImagePath = await findLocalImageFile(folderPath, input.imageFilePath);
+    if (input.imageFilePath) {
+      localImagePath = await findLocalImageFile(folderPath, input.imageFilePath);
+    } else {
+      localImagePath = await findOptionalNotesImageFile(folderPath, configuredImageFile);
+      if (!localImagePath) {
+        localImagePath = await findLocalImageFile(folderPath);
+      }
+    }
     imageUrl = normalizeSingleLineInput(input.imageUrl);
     if (!imageUrl) {
-      imageUrl = normalizeSingleLineInput(await readTextIfExists(imageUrlPath));
-    } else {
-      await fs.writeFile(imageUrlPath, `${imageUrl}\n`, "utf8");
+      imageUrl = configuredImageUrl;
     }
 
     if (localImagePath) {
@@ -977,15 +1509,13 @@ Write one or two short paragraphs that explain what students are doing in this s
     } else if (input.imageUrl && normalizeSingleLineInput(input.imageUrl)) {
       imageSource = "cli-url";
     } else if (imageUrl) {
-      imageSource = "file-url";
+      imageSource = "notes-url";
     }
   }
 
   let aiImagePrompt = normalizeSingleLineInput(input.aiImagePrompt);
   if (!aiImagePrompt) {
-    aiImagePrompt = normalizeSingleLineInput(await readTextIfExists(aiPromptPath));
-  } else {
-    await fs.writeFile(aiPromptPath, `${aiImagePrompt}\n`, "utf8");
+    aiImagePrompt = configuredAiImagePrompt;
   }
 
   return {
@@ -1040,7 +1570,10 @@ async function resolveTaskFolderName(
   const directories = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
-    .filter((name) => normalizeLooseKey(name) !== normalizeLooseKey(TODAY_SECTION_ASSET_TITLE));
+    .filter((name) => {
+      const key = normalizeLooseKey(name);
+      return key !== normalizeLooseKey(TODAY_SECTION_ASSET_TITLE) && key !== normalizeLooseKey(QUIZ_SECTION_ASSET_TITLE);
+    });
 
   if (directories.length === 0) return defaultFolderName;
 
@@ -1053,7 +1586,14 @@ async function resolveTaskFolderName(
   });
   if (taskCandidate) return taskCandidate;
 
-  if (directories.length === 1) return directories[0];
+  if (directories.length === 1) {
+    const onlyKey = normalizeLooseKey(directories[0]);
+    const onlyCompact = onlyKey.replace(/\s+/g, "");
+    const isAnotherStandardTask = /^task [abc](?:\s|$)/.test(onlyKey) || /^task[abc](?:\b|$)/.test(onlyCompact);
+    if (!isAnotherStandardTask) {
+      return directories[0];
+    }
+  }
   return defaultFolderName;
 }
 
@@ -1458,7 +1998,7 @@ function buildTaskMarkdownFromNotes(input: {
     (_, tone: string, content: string) => {
       const normalizedTone = tone.toLowerCase();
       const body = stripCalloutPrefix(content, tone) || content.trim();
-      return `\n\n<p class="ng-task-callout ng-task-callout--${normalizedTone}">${escapeHtmlText(body)}</p>\n\n`;
+      return `\n\n:::${normalizedTone}\n${body.trim()}\n:::\n\n`;
     }
   );
 
@@ -1652,6 +2192,7 @@ async function prepareTaskAAssets(input: {
   assetsRoot: string;
   sessionName: string;
   taskFolderName: string;
+  taskLabel: string;
   notesText?: string;
   notesFilePath?: string;
 }): Promise<TaskAAssets> {
@@ -1668,22 +2209,68 @@ async function prepareTaskAAssets(input: {
 
   const createdFiles: string[] = [];
   const notesTemplate = `---
-pageTitle: ${NOTE_PLACEHOLDER_TOKEN}
+pageTitle: "${input.taskLabel}"
 media:
   youtube:
     width: 560
 ---
 
-Write student-facing content directly in this file using Markdown.
+Use the sections below as a starter template and replace the example content with real task instructions.
 
-Examples:
-![Alt text](images/example.jpg)
+### Learning Goal
+Describe what students are trying to build, test, or explain in ${input.taskLabel}.
 
-:::note
-Note text
-:::
+### Materials
+- [ADD MATERIAL]
+- [ADD MATERIAL]
+- [ADD MATERIAL]
+
+### Steps
+1. [ADD STEP]
+2. [ADD STEP]
+3. [ADD STEP]
+
+### Success Checklist
+- [ ] I completed the core task.
+- [ ] I tested my work safely.
+- [ ] I can explain one thing I changed or learned.
+
+### Example Local Image
+Store local images in the \`images/\` folder and reference them like this:
+
+![Example task image](images/example.jpg)
+
+### Example Video
+Paste a YouTube, Vimeo, or direct video link on its own line:
 
 https://youtu.be/your-video-id
+
+### Example Table
+[TABLE]
+| Item | Purpose | Status |
+| --- | --- | --- |
+| Example component | What it is used for | Ready |
+| Example tool | How it helps | Needed |
+[/TABLE]
+
+### Example Callouts
+[NOTE]Helpful context, teacher tips, or reminders can go here.[/NOTE]
+
+[INFO]Background information or a concept explanation can go here.[/INFO]
+
+[WARNING]Safety advice, fragile-step warnings, or equipment cautions can go here.[/WARNING]
+
+[QUESTION]Reflection prompts or peer discussion questions can go here.[/QUESTION]
+
+[SUCCESS]Describe what a successful result looks like here.[/SUCCESS]
+
+### Helpful Link
+[Add a supporting resource](https://example.com)
+
+### Optional Agent Brief
+[AGENT]
+Describe any extra structure, accessibility requirements, or enrichment you want the cloud agent to consider.
+[/AGENT]
 `;
   if (await ensureFileWithTemplate(notesPath, notesTemplate)) createdFiles.push(notesPath);
 
@@ -1717,73 +2304,2479 @@ https://youtu.be/your-video-id
   };
 }
 
+function findModulePageItemByTitle(
+  moduleItems: CanvasModuleItem[],
+  pageTitle: string
+): CanvasModuleItem | undefined {
+  return moduleItems.find(
+    (item) =>
+      item.type === "Page" &&
+      Boolean(item.page_url) &&
+      normalizeName(item.title) === normalizeName(pageTitle)
+  );
+}
+
+function findModuleSubHeaderByTitle(
+  moduleItems: CanvasModuleItem[],
+  title: string
+): CanvasModuleItem | undefined {
+  return moduleItems.find(
+    (item) => item.type === "SubHeader" && normalizeName(item.title) === normalizeName(title)
+  );
+}
+
+function findModuleQuizItemByTitle(
+  moduleItems: CanvasModuleItem[],
+  quizTitle: string
+): CanvasModuleItem | undefined {
+  return moduleItems.find(
+    (item) => item.type === "Quiz" && normalizeName(item.title) === normalizeName(quizTitle)
+  );
+}
+
+function findModuleQuizItem(
+  moduleItems: CanvasModuleItem[],
+  quizTitle: string,
+  quizId?: number
+): CanvasModuleItem | undefined {
+  if (quizId !== undefined) {
+    const byContentId = moduleItems.find((item) => item.type === "Quiz" && item.content_id === quizId);
+    if (byContentId) return byContentId;
+  }
+  return findModuleQuizItemByTitle(moduleItems, quizTitle);
+}
+
+async function findExactModuleByNameIfExists(
+  client: CanvasClient,
+  courseId: number,
+  moduleName: string
+): Promise<CanvasModuleSummary | undefined> {
+  const modules = await client.listModules(courseId, moduleName);
+  const matches = modules.filter((module) => normalizeName(module.name) === normalizeName(moduleName));
+  if (matches.length > 1) {
+    const names = matches.map((module) => module.name).join(", ");
+    throw new Error(`Multiple modules matched "${moduleName}": ${names}`);
+  }
+  return matches[0];
+}
+
+async function upsertCoursePageByTitle(input: {
+  client: CanvasClient;
+  courseId: number;
+  pageTitle: string;
+  bodyHtml: string;
+  published: boolean;
+  existingPageUrl?: string;
+  beforeUpdate?: (pageUrl: string) => Promise<void>;
+}): Promise<UpsertCoursePageResult> {
+  const {
+    client,
+    courseId,
+    pageTitle,
+    bodyHtml,
+    published,
+    existingPageUrl,
+    beforeUpdate
+  } = input;
+
+  if (existingPageUrl) {
+    if (beforeUpdate) {
+      await beforeUpdate(existingPageUrl);
+    }
+    await client.updatePage(courseId, existingPageUrl, {
+      title: pageTitle,
+      body: bodyHtml,
+      published
+    });
+    return {
+      pageUrl: existingPageUrl,
+      createdPage: false
+    };
+  }
+
+  const pages = await client.listPages(courseId, pageTitle);
+  const existingPage = pages.find((page) => normalizeName(page.title) === normalizeName(pageTitle));
+  if (existingPage) {
+    if (beforeUpdate) {
+      await beforeUpdate(existingPage.url);
+    }
+    await client.updatePage(courseId, existingPage.url, {
+      title: pageTitle,
+      body: bodyHtml,
+      published
+    });
+    return {
+      pageUrl: existingPage.url,
+      createdPage: false
+    };
+  }
+
+  const created = await client.createPage(courseId, {
+    title: pageTitle,
+    body: bodyHtml,
+    published
+  });
+  return {
+    pageUrl: created.url,
+    createdPage: true
+  };
+}
+
+async function ensureModulePagePlacement(input: {
+  client: CanvasClient;
+  courseId: number;
+  moduleId: number;
+  moduleItems: CanvasModuleItem[];
+  pageTitle: string;
+  pageUrl: string;
+  insertionPosition: number;
+}): Promise<EnsureModulePagePlacementResult> {
+  const moduleItemForPage = input.moduleItems.find(
+    (item) => item.type === "Page" && item.page_url === input.pageUrl
+  );
+  if (!moduleItemForPage) {
+    await input.client.createModulePageItem(input.courseId, input.moduleId, {
+      title: input.pageTitle,
+      pageUrl: input.pageUrl,
+      position: input.insertionPosition,
+      indent: MODULE_ITEM_DEFAULT_INDENT
+    });
+    return {
+      createdModuleItem: true,
+      movedModuleItem: false
+    };
+  }
+
+  if (
+    moduleItemForPage.position !== input.insertionPosition ||
+    (moduleItemForPage.indent ?? 0) !== MODULE_ITEM_DEFAULT_INDENT ||
+    normalizeName(moduleItemForPage.title) !== normalizeName(input.pageTitle)
+  ) {
+    await input.client.updateModuleItemPosition(
+      input.courseId,
+      input.moduleId,
+      moduleItemForPage.id,
+      input.insertionPosition,
+      MODULE_ITEM_DEFAULT_INDENT,
+      input.pageTitle
+    );
+    return {
+      createdModuleItem: false,
+      movedModuleItem: true
+    };
+  }
+
+  return {
+    createdModuleItem: false,
+    movedModuleItem: false
+  };
+}
+
+async function ensureModuleQuizPlacement(input: {
+  client: CanvasClient;
+  courseId: number;
+  moduleId: number;
+  moduleItems: CanvasModuleItem[];
+  quizTitle: string;
+  quizId: number;
+  insertionPosition: number;
+}): Promise<EnsureModulePagePlacementResult> {
+  const moduleItemForQuiz = findModuleQuizItem(input.moduleItems, input.quizTitle, input.quizId);
+  if (!moduleItemForQuiz) {
+    await input.client.createModuleQuizItem(input.courseId, input.moduleId, {
+      title: input.quizTitle,
+      quizId: input.quizId,
+      position: input.insertionPosition,
+      indent: MODULE_ITEM_DEFAULT_INDENT
+    });
+    return {
+      createdModuleItem: true,
+      movedModuleItem: false
+    };
+  }
+
+  if (
+    moduleItemForQuiz.position !== input.insertionPosition ||
+    (moduleItemForQuiz.indent ?? 0) !== MODULE_ITEM_DEFAULT_INDENT ||
+    normalizeName(moduleItemForQuiz.title) !== normalizeName(input.quizTitle)
+  ) {
+    await input.client.updateModuleItemPosition(
+      input.courseId,
+      input.moduleId,
+      moduleItemForQuiz.id,
+      input.insertionPosition,
+      MODULE_ITEM_DEFAULT_INDENT,
+      input.quizTitle
+    );
+    return {
+      createdModuleItem: false,
+      movedModuleItem: true
+    };
+  }
+
+  return {
+    createdModuleItem: false,
+    movedModuleItem: false
+  };
+}
+
+async function upsertModulePage(input: {
+  client: CanvasClient;
+  courseId: number;
+  moduleId: number;
+  moduleItems: CanvasModuleItem[];
+  pageTitle: string;
+  bodyHtml: string;
+  published: boolean;
+  insertionPosition: number;
+}): Promise<UpsertCoursePageResult & EnsureModulePagePlacementResult> {
+  const existingModulePage = findModulePageItemByTitle(input.moduleItems, input.pageTitle);
+  const pageResult = await upsertCoursePageByTitle({
+    client: input.client,
+    courseId: input.courseId,
+    pageTitle: input.pageTitle,
+    bodyHtml: input.bodyHtml,
+    published: input.published,
+    existingPageUrl: existingModulePage?.page_url ? String(existingModulePage.page_url) : undefined
+  });
+  const placementResult = await ensureModulePagePlacement({
+    client: input.client,
+    courseId: input.courseId,
+    moduleId: input.moduleId,
+    moduleItems: input.moduleItems,
+    pageTitle: input.pageTitle,
+    pageUrl: pageResult.pageUrl,
+    insertionPosition: input.insertionPosition
+  });
+  return {
+    ...pageResult,
+    ...placementResult
+  };
+}
+
+async function runSessionHeadersWorkflow(input: {
+  courseId: number;
+  moduleName: string;
+  sessionNumber: number;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const config = await loadConfig();
+  const sessionMeta: SessionMetadata = {
+    ...parseSessionMetadata(input.moduleName),
+    sessionNumber: input.sessionNumber,
+    sessionNumberPadded: String(input.sessionNumber).padStart(
+      Math.max(1, Math.trunc(config.sessions.sessionNumberPad || 2)),
+      "0"
+    )
+  };
+  const headers = buildSessionHeaderTitles(input.sessionNumber, config.sessions);
+  const module = await resolveModuleByName(client, input.courseId, input.moduleName);
+  const moduleItems = await client.listModuleItems(input.courseId, module.id);
+  const existingHeaderKeys = new Set(
+    moduleItems
+      .filter((item) => item.type === "SubHeader")
+      .map((item) => normalizeName(item.title))
+  );
+
+  const existingHeaders = headers.filter((title) => existingHeaderKeys.has(normalizeName(title)));
+  const missingHeaders = headers.filter((title) => !existingHeaderKeys.has(normalizeName(title)));
+  const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
+    client,
+    courseId: input.courseId,
+    sessionMeta,
+    dryRun: input.dryRun
+  });
+
+  console.log(`Module: ${module.name} (${module.id})`);
+  console.log(`Session: ${String(input.sessionNumber).padStart(2, "0")}`);
+  console.log("Headers:");
+  for (const title of headers) {
+    const status = existingHeaderKeys.has(normalizeName(title)) ? " [exists]" : "";
+    console.log(`- ${title}${status}`);
+  }
+  if (filesScaffoldResult) {
+    console.log(`Canvas files folders already present: ${filesScaffoldResult.existingPaths.length}`);
+    console.log(
+      `${input.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+      `${filesScaffoldResult.createdPaths.length}`
+    );
+    for (const folderPath of filesScaffoldResult.createdPaths) {
+      console.log(`+ ${folderPath}`);
+    }
+  }
+
+  if (input.dryRun) {
+    console.log("Dry run: no module items created.");
+    return;
+  }
+
+  for (const title of missingHeaders) {
+    await client.createModuleSubHeader(input.courseId, module.id, title);
+  }
+
+  console.log(
+    missingHeaders.length > 0
+      ? `Session headers created: ${missingHeaders.length}.`
+      : "Session headers already present."
+  );
+  if (existingHeaders.length > 0) {
+    console.log(`Existing headers left unchanged: ${existingHeaders.length}.`);
+  }
+}
+
+async function runTaskSectionWorkflow(input: {
+  courseId: number;
+  sessionName: string;
+  taskLetter: "A" | "B" | "C";
+  taskFolder?: string;
+  pageTitle?: string;
+  notesText?: string;
+  notesFilePath?: string;
+  publish: boolean;
+  assetsRoot: string;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const sessionMeta = parseSessionMetadata(input.sessionName);
+  const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
+    client,
+    courseId: input.courseId,
+    sessionMeta,
+    dryRun: input.dryRun
+  });
+  const taskConfig = {
+    A: {
+      defaultFolderName: TASK_A_DEFAULT_FOLDER_NAME,
+      filesFolderKey: "task_a" as const,
+      buildSection: buildTaskASection,
+      sectionLabel: "Task A"
+    },
+    B: {
+      defaultFolderName: TASK_B_DEFAULT_FOLDER_NAME,
+      filesFolderKey: "task_b" as const,
+      buildSection: buildTaskBSection,
+      sectionLabel: "Task B"
+    },
+    C: {
+      defaultFolderName: TASK_C_DEFAULT_FOLDER_NAME,
+      filesFolderKey: "task_c" as const,
+      buildSection: buildTaskCSection,
+      sectionLabel: "Task C"
+    }
+  }[input.taskLetter];
+
+  const taskFolderName = await resolveTaskFolderName(
+    input.assetsRoot,
+    input.sessionName,
+    input.taskLetter,
+    taskConfig.defaultFolderName,
+    input.taskFolder
+  );
+
+  const assets = await prepareTaskAAssets({
+    assetsRoot: input.assetsRoot,
+    sessionName: input.sessionName,
+    taskFolderName,
+    taskLabel: taskConfig.sectionLabel,
+    notesText: input.notesText,
+    notesFilePath: input.notesFilePath
+  });
+
+  const pageTitle =
+    input.pageTitle ??
+    assets.pageTitle ??
+    `${sessionMeta.topic} - ${taskConfig.sectionLabel}`;
+  const taskTitle = pageTitle;
+
+  const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
+  const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
+  let uploadedLocalMediaFolderPath: string | undefined;
+
+  if (!input.dryRun && assets.localMedia.length > 0) {
+    if (!sessionMeta.sessionNumberPadded) {
+      throw new Error(
+        `Cannot map session name "${input.sessionName}" to a Session_NN/${taskConfig.filesFolderKey} files folder for media upload.`
+      );
+    }
+    const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, taskConfig.filesFolderKey);
+    uploadedLocalMediaFolderPath = sessionFolderPath;
+    for (const local of assets.localMedia) {
+      const fileData = Buffer.from(await fs.readFile(local.absolutePath));
+      const uploaded = await uploadFileToCanvasSessionFolder({
+        courseId: input.courseId,
+        sessionFolderPath,
+        fileName: local.fileName,
+        contentType: local.contentType,
+        data: fileData
+      });
+      mediaAssets.push({
+        url: uploaded.url,
+        kind: local.kind,
+        label: local.relativePath
+      });
+      uploadedLocalMedia.push({
+        source: local.relativePath,
+        uploadedUrl: uploaded.url,
+        id: uploaded.id
+      });
+    }
+  } else {
+    for (const local of assets.localMedia) {
+      mediaAssets.push({
+        url: local.relativePath,
+        kind: local.kind,
+        label: local.relativePath
+      });
+    }
+  }
+
+  const notesBody = normalizeTaskBlockText(assets.authoredBodyText ?? assets.notesText);
+  if (!notesBody) {
+    throw new Error(
+      `${taskConfig.sectionLabel} notes.md is empty. Add student-facing content and processor tags, then retry.`
+    );
+  }
+
+  const mediaLookup = buildTaskAMediaLookup(mediaAssets);
+  const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
+    notesBody,
+    mediaLookup,
+    iframeTemplate: assets.iframeTemplate,
+    youtubeEmbedWidth: assets.youtubeEmbedWidth
+  });
+  const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
+
+  const built = await taskConfig.buildSection(client, input.courseId, input.sessionName, {
+    pageTitle,
+    taskTitle,
+    bodyMarkdown: finalTaskBodyMarkdown,
+    suppressTaskTitleHeading: true,
+    disableAutoMediaSection: true,
+    calloutStyles: finalCalloutStyles,
+    mediaAssets
+  });
+
+  console.log(`Course: ${input.courseId}`);
+  console.log(`Session module: ${built.module.name} (${built.module.id})`);
+  console.log(`${taskConfig.sectionLabel} header: ${built.taskHeaderTitle}`);
+  console.log(`Task folder: ${taskFolderName}`);
+  console.log(`Assets folder: ${assets.folderPath}`);
+  console.log(`Page title: ${pageTitle}`);
+  console.log(`Publish mode: ${input.publish ? "published" : "unpublished (default)"}`);
+  if (assets.createdFiles.length > 0) {
+    console.log("Created local asset templates:");
+    for (const createdPath of assets.createdFiles) {
+      console.log(`- ${createdPath}`);
+    }
+  }
+  console.log("Task body source: notes.md markdown/legacy compatible mode");
+  console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
+  console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
+  console.log(`Media URLs: ${assets.mediaUrls.length}`);
+  console.log(`Local media files: ${assets.localMedia.length}`);
+  console.log(`Media references resolved: ${mediaLookup.size}`);
+  console.log(`Target module position: ${built.insertionPosition}`);
+  if (filesScaffoldResult && (input.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
+    console.log(
+      `${input.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+      `${filesScaffoldResult.createdPaths.length}`
+    );
+    for (const folderPath of filesScaffoldResult.createdPaths) {
+      console.log(`+ ${folderPath}`);
+    }
+  }
+
+  if (input.dryRun) {
+    if (assets.localMedia.length > 0) {
+      console.log("Dry run: local media files are not uploaded.");
+    }
+    console.log("Dry run: no Canvas updates performed.");
+    console.log("Generated HTML preview:");
+    console.log(built.sectionHtml.split("\n").slice(0, 60).join("\n"));
+    return;
+  }
+
+  if (uploadedLocalMedia.length > 0) {
+    const sessionFolderPath =
+      uploadedLocalMediaFolderPath ?? `Session_[unknown]/${taskConfig.filesFolderKey}`;
+    console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
+    for (const uploaded of uploadedLocalMedia) {
+      console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
+    }
+  }
+
+  const pageResult = await upsertModulePage({
+    client,
+    courseId: input.courseId,
+    moduleId: built.module.id,
+    moduleItems: built.moduleItems,
+    pageTitle,
+    bodyHtml: built.sectionHtml,
+    published: input.publish,
+    insertionPosition: built.insertionPosition
+  });
+
+  console.log(pageResult.createdPage ? "Created page." : "Updated existing page.");
+  if (pageResult.createdModuleItem) console.log("Added page to session module.");
+  if (pageResult.movedModuleItem) console.log("Moved module item to target section.");
+  if (!pageResult.createdModuleItem && !pageResult.movedModuleItem) {
+    console.log("Module item placement already correct.");
+  }
+  console.log(`Page URL: ${env.canvasBaseUrl}/courses/${input.courseId}/pages/${pageResult.pageUrl}`);
+}
+
+async function runTodaySectionWorkflow(input: {
+  courseId: number;
+  sessionName: string;
+  pageTitle?: string;
+  notesText?: string;
+  notesFilePath?: string;
+  imageUrl?: string;
+  imageId?: number;
+  imageFilePath?: string;
+  aiImagePrompt?: string;
+  publish: boolean;
+  assetsRoot: string;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  if (input.notesText && input.notesFilePath) {
+    throw new Error("Use either notes text or notes file, not both.");
+  }
+  if (input.imageUrl && input.imageId !== undefined) {
+    throw new Error("Use either image URL or image id, not both.");
+  }
+  if (input.imageUrl && input.imageFilePath) {
+    throw new Error("Use either image URL or image file, not both.");
+  }
+  if (input.imageFilePath && input.imageId !== undefined) {
+    throw new Error("Use either image file or image id, not both.");
+  }
+
+  const client = input.client ?? new CanvasClient();
+  const sessionMeta = parseSessionMetadata(input.sessionName);
+  const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
+    client,
+    courseId: input.courseId,
+    sessionMeta,
+    dryRun: input.dryRun
+  });
+  const pageTitle = input.pageTitle ?? buildIntroductionPageTitle(input.sessionName);
+
+  const assets = await prepareTodaySectionAssets({
+    assetsRoot: input.assetsRoot,
+    sessionName: input.sessionName,
+    sectionTitle: TODAY_SECTION_ASSET_TITLE,
+    notesText: input.notesText,
+    notesFilePath: input.notesFilePath,
+    imageUrl: input.imageUrl,
+    imageId: input.imageId,
+    imageFilePath: input.imageFilePath,
+    aiImagePrompt: input.aiImagePrompt,
+    client
+  });
+
+  const seedBuilt = await buildWhatAreWeDoingTodaySection(client, input.courseId, input.sessionName, {
+    sectionTitle: pageTitle,
+    notesText: undefined,
+    imageUrl: assets.imageUrl,
+    aiImagePrompt: assets.aiImagePrompt
+  });
+
+  const modulePageTitles = seedBuilt.moduleItems
+    .filter((item) => item.type === "Page")
+    .map((item) => item.title);
+  const taskLabels = extractTaskLabels(seedBuilt.moduleItems);
+  const fallbackSummaryParagraphs = extractParagraphsFromHtml(seedBuilt.sectionHtml, 2);
+
+  const generatedIntro = await generateTodayIntroFromAgent({
+    sessionName: input.sessionName,
+    sessionTopic: sessionMeta.topic,
+    notesText: assets.notesText,
+    taskLabels,
+    modulePageTitles,
+    fallbackSummaryParagraphs,
+    paragraphCount: 2
+  });
+  const agentNotesText = generatedIntro.paragraphs.join("\n\n");
+  const finalAiImagePrompt = assets.aiImagePrompt ?? generatedIntro.imagePrompt;
+
+  let built = await buildWhatAreWeDoingTodaySection(client, input.courseId, input.sessionName, {
+    sectionTitle: pageTitle,
+    notesText: agentNotesText,
+    imageUrl: assets.imageUrl,
+    aiImagePrompt: finalAiImagePrompt
+  });
+
+  console.log(`Course: ${input.courseId}`);
+  console.log(`Session module: ${built.module.name} (${built.module.id})`);
+  console.log(`Page title: ${pageTitle}`);
+  console.log(`Publish mode: ${input.publish ? "published" : "unpublished (default)"}`);
+  console.log(`Section folder key: ${TODAY_SECTION_ASSET_TITLE}`);
+  console.log(`Assets folder: ${assets.folderPath}`);
+  if (assets.createdFiles.length > 0) {
+    console.log("Created local asset templates:");
+    for (const createdPath of assets.createdFiles) {
+      console.log(`- ${createdPath}`);
+    }
+  }
+  console.log(`Source pages scanned: ${built.sourcePageCount}`);
+  console.log(`Intro pages used: ${built.introPageCount}`);
+  console.log("Summary source: agent-generated from notes + module context");
+  if (assets.imageSource === "local-file") {
+    const before = assets.localImageOriginalBytes ? formatByteSize(assets.localImageOriginalBytes) : undefined;
+    const after = assets.localImageOutputBytes ? formatByteSize(assets.localImageOutputBytes) : undefined;
+    const optimizedTag = assets.localImageOptimized ? " [optimized]" : "";
+    console.log(
+      `Image mode: local file override (${assets.localImagePath})${optimizedTag}` +
+      `${before && after ? ` (${before} -> ${after})` : ""}` +
+      `${assets.localImageOutputMimeType ? ` [${assets.localImageOutputMimeType}]` : ""}`
+    );
+  } else if (assets.imageSource === "canvas-file-id") {
+    console.log(
+      `Image mode: Canvas file id ${assets.canvasImageId}` +
+      `${assets.canvasImageDisplayName ? ` (${assets.canvasImageDisplayName})` : ""}`
+    );
+  } else if (assets.imageSource === "cli-url") {
+    console.log("Image mode: --image-url input");
+  } else if (assets.imageSource === "notes-url") {
+    console.log("Image mode: notes.md imageUrl");
+  } else if (built.imageUrl) {
+    console.log("Image mode: auto-detected from existing module intro content");
+  } else {
+    console.log("Image mode: placeholder");
+  }
+  if (finalAiImagePrompt) {
+    console.log(`AI image brief: ${finalAiImagePrompt}`);
+  }
+  console.log(`Target module position: ${built.insertionPosition}`);
+  if (filesScaffoldResult && (input.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
+    console.log(
+      `${input.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+      `${filesScaffoldResult.createdPaths.length}`
+    );
+    for (const folderPath of filesScaffoldResult.createdPaths) {
+      console.log(`+ ${folderPath}`);
+    }
+  }
+
+  if (input.dryRun) {
+    console.log("Dry run: no Canvas updates performed.");
+    console.log("Generated HTML preview:");
+    console.log(sanitizeTodaySectionPreviewHtml(built.sectionHtml).split("\n").slice(0, 40).join("\n"));
+    return;
+  }
+
+  if (assets.imageSource === "local-file" && assets.localImageOutputBuffer && assets.localImageOutputMimeType) {
+    if (!sessionMeta.sessionNumberPadded) {
+      throw new Error(
+        `Cannot map session name "${input.sessionName}" to a Session_NN/what_are_we_doing_today files folder for image upload.`
+      );
+    }
+    const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "what_are_we_doing_today");
+    const uploadName =
+      assets.localImageOutputFileName ??
+      `intro-${sessionMeta.sessionNumberPadded}${extensionForMimeType(assets.localImageOutputMimeType)}`;
+    const uploaded = await uploadImageToCanvasSessionFolder({
+      courseId: input.courseId,
+      sessionFolderPath,
+      fileName: uploadName,
+      contentType: assets.localImageOutputMimeType,
+      data: assets.localImageOutputBuffer
+    });
+    console.log(
+      `Uploaded image to Canvas files (${sessionFolderPath}): ${uploaded.display_name ?? uploadName} (${uploaded.id})`
+    );
+    built = await buildWhatAreWeDoingTodaySection(client, input.courseId, input.sessionName, {
+      sectionTitle: pageTitle,
+      notesText: agentNotesText,
+      imageUrl: uploaded.url,
+      aiImagePrompt: finalAiImagePrompt
+    });
+  }
+
+  const pageResult = await upsertModulePage({
+    client,
+    courseId: input.courseId,
+    moduleId: built.module.id,
+    moduleItems: built.moduleItems,
+    pageTitle,
+    bodyHtml: built.sectionHtml,
+    published: input.publish,
+    insertionPosition: built.insertionPosition
+  });
+
+  console.log(pageResult.createdPage ? "Created page." : "Updated existing page.");
+  if (pageResult.createdModuleItem) console.log("Added page to session module.");
+  if (pageResult.movedModuleItem) console.log("Moved module item to target section.");
+  if (!pageResult.createdModuleItem && !pageResult.movedModuleItem) {
+    console.log("Module item placement already correct.");
+  }
+  console.log(`Page URL: ${env.canvasBaseUrl}/courses/${input.courseId}/pages/${pageResult.pageUrl}`);
+}
+
+async function prepareTodaySectionStepAssets(input: {
+  sessionName: string;
+  assetsRoot: string;
+  notesText?: string;
+  notesFilePath?: string;
+  imageUrl?: string;
+  imageId?: number;
+  imageFilePath?: string;
+  aiImagePrompt?: string;
+  client?: CanvasClient;
+}): Promise<void> {
+  const assets = await prepareTodaySectionAssets({
+    assetsRoot: input.assetsRoot,
+    sessionName: input.sessionName,
+    sectionTitle: TODAY_SECTION_ASSET_TITLE,
+    notesText: input.notesText,
+    notesFilePath: input.notesFilePath,
+    imageUrl: input.imageUrl,
+    imageId: input.imageId,
+    imageFilePath: input.imageFilePath,
+    aiImagePrompt: input.aiImagePrompt,
+    client: input.client
+  });
+
+  console.log(`Session assets: ${assets.folderPath}`);
+  if (assets.createdFiles.length > 0) {
+    console.log("Created local asset templates:");
+    for (const createdPath of assets.createdFiles) {
+      console.log(`- ${createdPath}`);
+    }
+  } else {
+    console.log("Local asset templates already present.");
+  }
+  console.log(`Notes source: ${assets.notesText ? "ready" : "placeholder"}`);
+  console.log(`Image source: ${assets.imageSource}`);
+  console.log(`AI image prompt: ${assets.aiImagePrompt ? "ready" : "placeholder"}`);
+}
+
+async function runModuleSubHeaderWorkflow(input: {
+  courseId: number;
+  moduleName: string;
+  title: string;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const module = await resolveModuleByName(client, input.courseId, input.moduleName);
+  const moduleItems = await client.listModuleItems(input.courseId, module.id);
+  const existing = findModuleSubHeaderByTitle(moduleItems, input.title);
+
+  console.log(`Module: ${module.name} (${module.id})`);
+  console.log(`Subheader: ${input.title}`);
+
+  if (input.dryRun) {
+    console.log(existing ? "Dry run: subheader already present." : "Dry run: subheader would be created.");
+    return;
+  }
+
+  if (existing) {
+    console.log("Subheader already present.");
+    return;
+  }
+
+  await client.createModuleSubHeader(input.courseId, module.id, input.title);
+  console.log("Subheader created.");
+}
+
+function resolveModulePageInsertionPosition(
+  moduleItems: CanvasModuleItem[],
+  afterHeaderTitle?: string
+): number {
+  const sortedItems = [...moduleItems].sort((a, b) => a.position - b.position);
+  if (!afterHeaderTitle) {
+    const lastPosition = sortedItems.at(-1)?.position ?? 0;
+    return lastPosition + 1;
+  }
+
+  const header = findModuleSubHeaderByTitle(sortedItems, afterHeaderTitle);
+  if (!header) {
+    throw new Error(`Subheader "${afterHeaderTitle}" was not found in the module.`);
+  }
+  return header.position + 1;
+}
+
+async function renderOrchestratorPageHtml(input: {
+  courseId: number;
+  blocks: OrchestratorPageContentBlock[];
+  assetsRoot: string;
+  blueprintDir: string;
+  dryRun: boolean;
+}): Promise<{ html: string; uploadedImages: Array<{ source: string; uploadedUrl: string; id: number }> }> {
+  const lines: string[] = [];
+  const uploadedImages: Array<{ source: string; uploadedUrl: string; id: number }> = [];
+
+  for (const block of input.blocks) {
+    if (block.type === "markdown") {
+      lines.push(String(await marked.parse(block.value)));
+      continue;
+    }
+    if (block.type === "markdownFile") {
+      const markdownPath = await resolveOrchestratorContentPath({
+        filePath: block.path,
+        assetsRoot: input.assetsRoot,
+        blueprintDir: input.blueprintDir
+      });
+      const markdownText = await fs.readFile(markdownPath, "utf8");
+      lines.push(String(await marked.parse(markdownText)));
+      continue;
+    }
+    if (block.type === "html") {
+      lines.push(block.value);
+      continue;
+    }
+    if (block.type === "htmlFile") {
+      const htmlPath = await resolveOrchestratorContentPath({
+        filePath: block.path,
+        assetsRoot: input.assetsRoot,
+        blueprintDir: input.blueprintDir
+      });
+      lines.push(await fs.readFile(htmlPath, "utf8"));
+      continue;
+    }
+
+    const imagePath = await resolveOrchestratorContentPath({
+      filePath: block.path,
+      assetsRoot: input.assetsRoot,
+      blueprintDir: input.blueprintDir
+    });
+    const converted = await imageFileToDataUrl(imagePath);
+    let imageUrl = converted.dataUrl;
+    if (!input.dryRun) {
+      const baseName = path.basename(imagePath, path.extname(imagePath));
+      const fileName = `${toFilesystemSegment(baseName)}${extensionForMimeType(converted.outputMimeType) || path.extname(imagePath)}`;
+      const uploaded = await uploadImageToCanvasSessionFolder({
+        courseId: input.courseId,
+        sessionFolderPath: block.filesFolder,
+        fileName,
+        contentType: converted.outputMimeType,
+        data: converted.outputBuffer
+      });
+      imageUrl = uploaded.url;
+      uploadedImages.push({
+        source: block.path,
+        uploadedUrl: uploaded.url,
+        id: uploaded.id
+      });
+    }
+    const alt = block.alt?.trim() || path.basename(block.path);
+    lines.push(
+      `<p><img src="${escapeHtmlText(imageUrl)}" alt="${escapeHtmlText(alt)}" style="display:block;max-width:100%;height:auto;margin:12px auto;border-radius:8px;" /></p>`
+    );
+  }
+
+  return {
+    html: lines.join("\n").trim(),
+    uploadedImages
+  };
+}
+
+async function runModulePageWorkflow(input: {
+  courseId: number;
+  moduleName: string;
+  title: string;
+  publish: boolean;
+  afterHeaderTitle?: string;
+  content: OrchestratorPageContentBlock[];
+  assetsRoot: string;
+  blueprintDir: string;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const module = await resolveModuleByName(client, input.courseId, input.moduleName);
+  const moduleItems = await client.listModuleItems(input.courseId, module.id);
+  const insertionPosition = resolveModulePageInsertionPosition(moduleItems, input.afterHeaderTitle);
+  const rendered = await renderOrchestratorPageHtml({
+    courseId: input.courseId,
+    blocks: input.content,
+    assetsRoot: input.assetsRoot,
+    blueprintDir: input.blueprintDir,
+    dryRun: input.dryRun
+  });
+
+  console.log(`Module: ${module.name} (${module.id})`);
+  console.log(`Page title: ${input.title}`);
+  if (input.afterHeaderTitle) {
+    console.log(`Insert after subheader: ${input.afterHeaderTitle}`);
+  }
+  console.log(`Target module position: ${insertionPosition}`);
+
+  if (input.dryRun) {
+    console.log("Dry run: no Canvas updates performed.");
+    console.log("Generated HTML preview:");
+    console.log(rendered.html.split("\n").slice(0, 40).join("\n"));
+    return;
+  }
+
+  if (rendered.uploadedImages.length > 0) {
+    console.log(`Uploaded ${rendered.uploadedImages.length} image file(s):`);
+    for (const uploaded of rendered.uploadedImages) {
+      console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
+    }
+  }
+
+  const pageResult = await upsertModulePage({
+    client,
+    courseId: input.courseId,
+    moduleId: module.id,
+    moduleItems,
+    pageTitle: input.title,
+    bodyHtml: rendered.html,
+    published: input.publish,
+    insertionPosition
+  });
+
+  console.log(pageResult.createdPage ? "Created page." : "Updated existing page.");
+  if (pageResult.createdModuleItem) console.log("Added page to session module.");
+  if (pageResult.movedModuleItem) console.log("Moved module item to target section.");
+  if (!pageResult.createdModuleItem && !pageResult.movedModuleItem) {
+    console.log("Module item placement already correct.");
+  }
+  console.log(`Page URL: ${env.canvasBaseUrl}/courses/${input.courseId}/pages/${pageResult.pageUrl}`);
+}
+
+async function buildPreparedTodaySectionStepInput(
+  step: OrchestratorTodaySectionStep,
+  assetsRoot: string,
+  blueprintDir: string
+): Promise<PreparedTodaySectionStepInput> {
+  return {
+    notesText: step.notes,
+    notesFilePath: step.notesFile
+      ? await resolveOrchestratorContentPath({
+          filePath: step.notesFile,
+          assetsRoot,
+          blueprintDir
+        })
+      : undefined,
+    imageUrl: step.imageUrl,
+    imageId: step.imageId,
+    imageFilePath: step.imageFile,
+    aiImagePrompt: step.aiImagePrompt
+  };
+}
+
+async function buildPreparedTaskSectionStepInput(
+  step: OrchestratorTaskSectionStep,
+  assetsRoot: string,
+  blueprintDir: string
+): Promise<PreparedTaskSectionStepInput> {
+  return {
+    notesText: step.notes,
+    notesFilePath: step.notesFile
+      ? await resolveOrchestratorContentPath({
+          filePath: step.notesFile,
+          assetsRoot,
+          blueprintDir
+        })
+      : undefined
+  };
+}
+
+async function buildPreparedCreateQuizStepInput(
+  step: OrchestratorCreateQuizStep,
+  assetsRoot: string,
+  blueprintDir: string
+): Promise<PreparedCreateQuizStepInput> {
+  return {
+    quizFilePath: step.fromFile
+      ? await resolveOrchestratorContentPath({
+          filePath: step.fromFile,
+          assetsRoot,
+          blueprintDir
+        })
+      : undefined,
+    promptText: step.prompt,
+    promptFilePath: step.promptFile
+      ? await resolveOrchestratorContentPath({
+          filePath: step.promptFile,
+          assetsRoot,
+          blueprintDir
+        })
+      : undefined,
+    difficulty: step.difficulty
+  };
+}
+
+async function prepareCreateQuizStepAssets(input: {
+  sessionName: string;
+  assetsRoot: string;
+  promptText?: string;
+  promptFilePath?: string;
+}): Promise<void> {
+  const assets = await prepareQuizAssets({
+    assetsRoot: input.assetsRoot,
+    sessionName: input.sessionName,
+    promptText: input.promptText,
+    promptFilePath: input.promptFilePath
+  });
+
+  console.log(`Quiz assets: ${assets.folderPath}`);
+  if (assets.createdFiles.length > 0) {
+    console.log("Created local quiz prompt templates:");
+    for (const createdPath of assets.createdFiles) {
+      console.log(`- ${createdPath}`);
+    }
+  } else {
+    console.log("Local quiz prompt templates already present.");
+  }
+  console.log(`Prompt source: ${assets.promptText ? "ready" : "placeholder"}`);
+}
+
+async function runCloneSurveyBatchWorkflow(input: {
+  sourceCourseId: number;
+  targetCourseId: number;
+  sourceTitle: string;
+  titleTemplate: string;
+  sessionNumbers: number[];
+  pad: number;
+  skipExisting: boolean;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const source = await resolveExactQuizCloneSource({
+    client,
+    sourceCourseId: input.sourceCourseId,
+    sourceTitle: input.sourceTitle
+  });
+  const planned = input.sessionNumbers.map((sessionNumber) => ({
+    sessionNumber,
+    title: renderTitle(input.titleTemplate, sessionNumber, input.pad)
+  }));
+
+  const duplicatePlannedTitle = planned.find((item, index) =>
+    planned.findIndex((other) => normalizeName(other.title) === normalizeName(item.title)) !== index
+  );
+  if (duplicatePlannedTitle) {
+    throw new Error(`Generated duplicate title "${duplicatePlannedTitle.title}". Adjust the title template.`);
+  }
+
+  const existingTargets = new Map<string, Awaited<ReturnType<CanvasClient["listQuizzes"]>>[number]>();
+  for (const item of planned) {
+    const existing = await findExactQuizByTitleIfExists(client, input.targetCourseId, item.title);
+    if (existing) {
+      existingTargets.set(normalizeName(item.title), existing);
+    }
+  }
+
+  if (existingTargets.size > 0 && !input.skipExisting) {
+    const names = planned
+      .filter((item) => existingTargets.has(normalizeName(item.title)))
+      .map((item) => item.title)
+      .join(", ");
+    throw new Error(`Generated titles already exist: ${names}. Use --skip-existing to continue.`);
+  }
+
+  console.log(`Target course: ${input.targetCourseId}`);
+  console.log(`Source course: ${input.sourceCourseId}`);
+  console.log(`Source quiz: ${source.summary.title} (${source.summary.id})`);
+  console.log(`Source type: ${source.quiz.quiz_type ?? "assignment"}`);
+  console.log(`Questions to copy: ${source.questions.length}`);
+  console.log(`Title template: ${input.titleTemplate}`);
+  if (input.sourceCourseId !== input.targetCourseId) {
+    console.log("Cross-course clone: assignment group and availability dates will not be copied.");
+  }
+  console.log("Planned copies:");
+  for (const item of planned) {
+    const existing = existingTargets.get(normalizeName(item.title));
+    console.log(
+      `- Session ${String(item.sessionNumber).padStart(input.pad, "0")}: ${item.title}${existing ? ` [exists: ${existing.id}]` : ""}`
+    );
+  }
+
+  if (input.dryRun) {
+    console.log("Dry run: no quizzes created.");
+    return;
+  }
+
+  const skipped: string[] = [];
+  const created: Array<{ id: number; title: string }> = [];
+  for (const item of planned) {
+    const existing = existingTargets.get(normalizeName(item.title));
+    if (existing) {
+      skipped.push(item.title);
+      continue;
+    }
+
+    const newQuiz = await cloneQuizToCourse({
+      client,
+      sourceCourseId: input.sourceCourseId,
+      targetCourseId: input.targetCourseId,
+      sourceQuiz: source.quiz,
+      sourceQuestions: source.questions,
+      title: item.title
+    });
+    created.push(newQuiz);
+    existingTargets.set(normalizeName(item.title), newQuiz);
+    console.log(`Created: ${item.title} (${newQuiz.id})`);
+  }
+
+  console.log(`Created ${created.length} quiz copy/copies.`);
+  if (skipped.length > 0) {
+    console.log(`Skipped ${skipped.length} existing title(s): ${skipped.join(", ")}`);
+  }
+}
+
+async function runModuleCloneSurveyWorkflow(input: {
+  courseId: number;
+  moduleName: string;
+  sourceCourseId: number;
+  sourceTitle: string;
+  title: string;
+  afterHeaderTitle?: string;
+  skipExisting: boolean;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const source = await resolveExactQuizCloneSource({
+    client,
+    sourceCourseId: input.sourceCourseId,
+    sourceTitle: input.sourceTitle
+  });
+  const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, input.title);
+  const module = await resolveModuleByName(client, input.courseId, input.moduleName);
+  const moduleItems = await client.listModuleItems(input.courseId, module.id);
+  const insertionPosition = resolveModulePageInsertionPosition(moduleItems, input.afterHeaderTitle);
+  const existingModuleItem = findModuleQuizItem(moduleItems, input.title, existingQuiz?.id);
+
+  console.log(`Module: ${module.name} (${module.id})`);
+  console.log(`Source course: ${input.sourceCourseId}`);
+  console.log(`Source survey: ${source.summary.title} (${source.summary.id})`);
+  console.log(`Source type: ${source.quiz.quiz_type ?? "assignment"}`);
+  console.log(`Questions to copy: ${source.questions.length}`);
+  console.log(`Target survey title: ${input.title}`);
+  if (input.afterHeaderTitle) {
+    console.log(`Insert after subheader: ${input.afterHeaderTitle}`);
+  }
+  console.log(`Target module position: ${insertionPosition}`);
+  if (input.sourceCourseId !== input.courseId) {
+    console.log("Cross-course clone: assignment group and availability dates will not be copied.");
+  }
+
+  if (input.dryRun) {
+    if (existingQuiz) {
+      console.log(`Dry run: existing survey will be reused (${existingQuiz.id}).`);
+    } else {
+      console.log("Dry run: survey would be cloned into the target course.");
+    }
+
+    if (!existingModuleItem) {
+      console.log("Dry run: survey would be added to the module.");
+    } else if (existingModuleItem.position !== insertionPosition) {
+      console.log("Dry run: survey module item would be moved to the target section.");
+    } else {
+      console.log("Dry run: survey module item placement already correct.");
+    }
+    return;
+  }
+
+  if (existingQuiz && !input.skipExisting) {
+    throw new Error(`Survey "${input.title}" already exists in course ${input.courseId}. Use skipExisting to reuse it.`);
+  }
+
+  const targetQuiz =
+    existingQuiz ??
+    await cloneQuizToCourse({
+      client,
+      sourceCourseId: input.sourceCourseId,
+      targetCourseId: input.courseId,
+      sourceQuiz: source.quiz,
+      sourceQuestions: source.questions,
+      title: input.title
+    });
+
+  if (existingQuiz) {
+    console.log(`Using existing survey: ${targetQuiz.title} (${targetQuiz.id})`);
+  } else {
+    console.log(`Created survey: ${targetQuiz.title} (${targetQuiz.id})`);
+  }
+
+  const placementResult = await ensureModuleQuizPlacement({
+    client,
+    courseId: input.courseId,
+    moduleId: module.id,
+    moduleItems,
+    quizTitle: input.title,
+    quizId: targetQuiz.id,
+    insertionPosition
+  });
+
+  if (placementResult.createdModuleItem) console.log("Added survey to session module.");
+  if (placementResult.movedModuleItem) console.log("Moved survey module item to target section.");
+  if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
+    console.log("Survey module item placement already correct.");
+  }
+  console.log(`Quiz URL: ${env.canvasBaseUrl}/courses/${input.courseId}/quizzes/${targetQuiz.id}`);
+}
+
+async function loadQuizFromFile(filePath: string): Promise<ReturnType<typeof validateNexgenQuiz>> {
+  const raw = JSON.parse(await fs.readFile(filePath, "utf8"));
+  return validateNexgenQuiz(raw);
+}
+
+async function runCreateQuizWorkflow(input: {
+  courseId: number;
+  title?: string;
+  quizFilePath?: string;
+  promptText?: string;
+  promptFilePath?: string;
+  difficulty?: QuizDifficulty;
+  publish: boolean;
+  skipExisting: boolean;
+  moduleName?: string;
+  afterHeaderTitle?: string;
+  dryRun: boolean;
+  sessionName?: string;
+  assetsRoot?: string;
+  client?: CanvasClient;
+}): Promise<void> {
+  if (input.quizFilePath && (input.promptText || input.promptFilePath || input.difficulty)) {
+    throw new Error("Quiz creation accepts either a quiz JSON file or a prompt source, not both.");
+  }
+  if (input.promptText && input.promptFilePath) {
+    throw new Error("Use either prompt text or prompt file, not both.");
+  }
+
+  const client = input.client ?? new CanvasClient();
+  let sourceQuiz: ReturnType<typeof validateNexgenQuiz>;
+  let sourceLabel: string;
+  let sessionPromptAssets:
+    | {
+        folderPath: string;
+        promptPath: string;
+        promptText?: string;
+        createdFiles: string[];
+      }
+    | undefined;
+
+  if (input.quizFilePath) {
+    sourceQuiz = await loadQuizFromFile(input.quizFilePath);
+    sourceLabel = `JSON file ${input.quizFilePath}`;
+  } else {
+    let promptText = normalizeQuizPromptText(input.promptText);
+
+    if (input.sessionName && input.assetsRoot) {
+      sessionPromptAssets = await prepareQuizAssets({
+        assetsRoot: input.assetsRoot,
+        sessionName: input.sessionName,
+        promptText: input.promptText,
+        promptFilePath: input.promptFilePath
+      });
+      promptText = sessionPromptAssets.promptText;
+      sourceLabel = `session prompt ${sessionPromptAssets.promptPath}`;
+    } else if (!promptText && input.promptFilePath) {
+      promptText = normalizeQuizPromptText(await fs.readFile(input.promptFilePath, "utf8"));
+      sourceLabel = `prompt file ${input.promptFilePath}`;
+    } else {
+      sourceLabel = "inline prompt";
+    }
+
+    if (!promptText) {
+      throw new Error(
+        input.sessionName
+          ? `Quiz prompt is empty for session "${input.sessionName}". Update ${QUIZ_SECTION_ASSET_TITLE}/${QUIZ_PROMPT_FILE_NAME} and retry.`
+          : "Quiz prompt is empty. Provide prompt text or a prompt file."
+      );
+    }
+
+    sourceQuiz = validateNexgenQuiz(await generateQuizFromAgent(promptText, { difficulty: input.difficulty }));
+  }
+
+  const effectiveTitle = input.title ?? sourceQuiz.title;
+  const mapped = mapToCanvasQuiz({
+    ...sourceQuiz,
+    title: effectiveTitle
+  });
+  mapped.canvasQuiz.published = input.publish;
+
+  const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
+
+  const effectiveAfterHeaderTitle = input.moduleName
+    ? (input.afterHeaderTitle ?? QUIZ_SECTION_ASSET_TITLE)
+    : undefined;
+  let module: CanvasModuleSummary | undefined;
+  let moduleItems: CanvasModuleItem[] = [];
+  let insertionPosition: number | undefined;
+  let existingModuleItem: CanvasModuleItem | undefined;
+  if (input.moduleName) {
+    module = await resolveModuleByName(client, input.courseId, input.moduleName);
+    moduleItems = await client.listModuleItems(input.courseId, module.id);
+    insertionPosition = resolveModulePageInsertionPosition(moduleItems, effectiveAfterHeaderTitle);
+    existingModuleItem = findModuleQuizItem(moduleItems, effectiveTitle, existingQuiz?.id);
+  }
+
+  console.log(`Course: ${input.courseId}`);
+  console.log(`Quiz source: ${sourceLabel}`);
+  console.log(`Quiz title: ${effectiveTitle}`);
+  console.log(`Questions: ${sourceQuiz.questions.length} (expected 5)`);
+  if (input.difficulty) {
+    console.log(`Requested difficulty: ${input.difficulty}`);
+  }
+  if (sessionPromptAssets) {
+    console.log(`Prompt assets folder: ${sessionPromptAssets.folderPath}`);
+    if (sessionPromptAssets.createdFiles.length > 0) {
+      console.log("Created local quiz prompt templates:");
+      for (const createdPath of sessionPromptAssets.createdFiles) {
+        console.log(`- ${createdPath}`);
+      }
+    }
+    console.log(`Prompt source: ${sessionPromptAssets.promptText ? "ready" : "placeholder"}`);
+  }
+  if (input.moduleName && module && insertionPosition !== undefined) {
+    console.log(`Module: ${module.name} (${module.id})`);
+    if (effectiveAfterHeaderTitle) {
+      console.log(`Insert after subheader: ${effectiveAfterHeaderTitle}`);
+    }
+    console.log(`Target module position: ${insertionPosition}`);
+  }
+
+  if (input.dryRun) {
+    console.log(
+      existingQuiz
+        ? `Dry run: existing quiz will be reused (${existingQuiz.id}).`
+        : "Dry run: quiz would be created."
+    );
+    if (input.moduleName) {
+      if (!existingModuleItem) {
+        console.log("Dry run: quiz would be added to the module.");
+      } else if (existingModuleItem.position !== insertionPosition) {
+        console.log("Dry run: quiz module item would be moved to the target section.");
+      } else {
+        console.log("Dry run: quiz module item placement already correct.");
+      }
+    }
+    return;
+  }
+
+  if (existingQuiz && !input.skipExisting) {
+    throw new Error(`Quiz "${effectiveTitle}" already exists in course ${input.courseId}. Use skipExisting to reuse it.`);
+  }
+
+  const targetQuiz =
+    existingQuiz ??
+    await (async () => {
+      const created = await client.createQuiz(input.courseId, mapped.canvasQuiz);
+      for (const question of mapped.canvasQuestions) {
+        await client.addQuizQuestion(input.courseId, created.id, question);
+      }
+      if (mapped.canvasQuiz.published === false) {
+        try {
+          await client.updateQuiz(input.courseId, created.id, { published: true });
+          await client.updateQuiz(input.courseId, created.id, { published: false });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.warn(`Warning: unable to refresh quiz question count. You can publish/unpublish manually. ${message}`);
+        }
+      }
+      return created;
+    })();
+
+  if (existingQuiz) {
+    console.log(`Using existing quiz: ${targetQuiz.title} (${targetQuiz.id})`);
+  } else {
+    console.log(`Created quiz: ${targetQuiz.title} (${targetQuiz.id})`);
+  }
+
+  if (module && insertionPosition !== undefined) {
+    const placementResult = await ensureModuleQuizPlacement({
+      client,
+      courseId: input.courseId,
+      moduleId: module.id,
+      moduleItems,
+      quizTitle: effectiveTitle,
+      quizId: targetQuiz.id,
+      insertionPosition
+    });
+
+    if (placementResult.createdModuleItem) console.log("Added quiz to session module.");
+    if (placementResult.movedModuleItem) console.log("Moved quiz module item to target section.");
+    if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
+      console.log("Quiz module item placement already correct.");
+    }
+  }
+
+  console.log(`Quiz URL: ${env.canvasBaseUrl}/courses/${input.courseId}/quizzes/${targetQuiz.id}`);
+}
+
+async function loadSurveyFromFile(filePath: string): Promise<ReturnType<typeof validateNexgenSurvey>> {
+  const raw = JSON.parse(await fs.readFile(filePath, "utf8"));
+  return validateNexgenSurvey(raw);
+}
+
+function summarizeSurveyQuestionTypes(
+  questions: ReturnType<typeof validateNexgenSurvey>["questions"]
+): string {
+  const counts = new Map<string, number>();
+  for (const question of questions) {
+    counts.set(question.type, (counts.get(question.type) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([type, count]) => `${type}:${count}`)
+    .join(", ");
+}
+
+async function runCreateSurveyWorkflow(input: {
+  courseId: number;
+  surveyFilePath: string;
+  title?: string;
+  publish: boolean;
+  skipExisting: boolean;
+  moduleName?: string;
+  afterHeaderTitle?: string;
+  dryRun: boolean;
+  client?: CanvasClient;
+}): Promise<void> {
+  const client = input.client ?? new CanvasClient();
+  const survey = await loadSurveyFromFile(input.surveyFilePath);
+  const effectiveTitle = input.title ?? survey.title;
+  const mapped = mapToCanvasSurvey(survey, {
+    title: effectiveTitle,
+    published: input.publish
+  });
+  const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
+
+  let module: CanvasModuleSummary | undefined;
+  let moduleItems: CanvasModuleItem[] = [];
+  let insertionPosition: number | undefined;
+  let existingModuleItem: CanvasModuleItem | undefined;
+  if (input.moduleName) {
+    module = await resolveModuleByName(client, input.courseId, input.moduleName);
+    moduleItems = await client.listModuleItems(input.courseId, module.id);
+    insertionPosition = resolveModulePageInsertionPosition(moduleItems, input.afterHeaderTitle);
+    existingModuleItem = findModuleQuizItem(moduleItems, effectiveTitle, existingQuiz?.id);
+  }
+
+  console.log(`Course: ${input.courseId}`);
+  console.log(`Survey file: ${input.surveyFilePath}`);
+  console.log(`Survey title: ${effectiveTitle}`);
+  console.log(`Survey type: ${mapped.canvasQuiz.quiz_type}`);
+  console.log(`Questions: ${survey.questions.length}`);
+  console.log(`Question types: ${summarizeSurveyQuestionTypes(survey.questions)}`);
+  if (input.moduleName && module && insertionPosition !== undefined) {
+    console.log(`Module: ${module.name} (${module.id})`);
+    if (input.afterHeaderTitle) {
+      console.log(`Insert after subheader: ${input.afterHeaderTitle}`);
+    }
+    console.log(`Target module position: ${insertionPosition}`);
+  }
+
+  if (input.dryRun) {
+    console.log(
+      existingQuiz
+        ? `Dry run: existing survey will be reused (${existingQuiz.id}).`
+        : "Dry run: survey would be created."
+    );
+    if (input.moduleName) {
+      if (!existingModuleItem) {
+        console.log("Dry run: survey would be added to the module.");
+      } else if (existingModuleItem.position !== insertionPosition) {
+        console.log("Dry run: survey module item would be moved to the target section.");
+      } else {
+        console.log("Dry run: survey module item placement already correct.");
+      }
+    }
+    return;
+  }
+
+  if (existingQuiz && !input.skipExisting) {
+    throw new Error(`Survey "${effectiveTitle}" already exists in course ${input.courseId}. Use --skip-existing to reuse it.`);
+  }
+
+  const targetQuiz =
+    existingQuiz ??
+    await (async () => {
+      const created = await client.createQuiz(input.courseId, mapped.canvasQuiz);
+      for (const question of mapped.canvasQuestions) {
+        await client.addQuizQuestion(input.courseId, created.id, question);
+      }
+      return created;
+    })();
+
+  if (existingQuiz) {
+    console.log(`Using existing survey: ${targetQuiz.title} (${targetQuiz.id})`);
+  } else {
+    console.log(`Created survey: ${targetQuiz.title} (${targetQuiz.id})`);
+  }
+
+  if (module && insertionPosition !== undefined) {
+    const placementResult = await ensureModuleQuizPlacement({
+      client,
+      courseId: input.courseId,
+      moduleId: module.id,
+      moduleItems,
+      quizTitle: effectiveTitle,
+      quizId: targetQuiz.id,
+      insertionPosition
+    });
+
+    if (placementResult.createdModuleItem) console.log("Added survey to session module.");
+    if (placementResult.movedModuleItem) console.log("Moved survey module item to target section.");
+    if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
+      console.log("Survey module item placement already correct.");
+    }
+  }
+
+  console.log(`Quiz URL: ${env.canvasBaseUrl}/courses/${input.courseId}/quizzes/${targetQuiz.id}`);
+}
+
+function requireObjectRecord(input: unknown, pathLabel: string): Record<string, unknown> {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new Error(`${pathLabel} must be an object.`);
+  }
+  return input as Record<string, unknown>;
+}
+
+function requireNonEmptyString(input: unknown, pathLabel: string): string {
+  if (typeof input !== "string" || input.trim().length === 0) {
+    throw new Error(`${pathLabel} must be a non-empty string.`);
+  }
+  return input.trim();
+}
+
+function optionalString(input: unknown, pathLabel: string): string | undefined {
+  if (input === undefined) return undefined;
+  if (typeof input !== "string") {
+    throw new Error(`${pathLabel} must be a string.`);
+  }
+  const trimmed = input.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function optionalBoolean(input: unknown, pathLabel: string): boolean | undefined {
+  if (input === undefined) return undefined;
+  if (typeof input !== "boolean") {
+    throw new Error(`${pathLabel} must be a boolean.`);
+  }
+  return input;
+}
+
+function optionalPositiveInteger(input: unknown, pathLabel: string): number | undefined {
+  if (input === undefined) return undefined;
+  if (typeof input !== "number" || !Number.isInteger(input) || input <= 0) {
+    throw new Error(`${pathLabel} must be a positive integer.`);
+  }
+  return input;
+}
+
+function optionalStringRecord(input: unknown, pathLabel: string): Record<string, string> | undefined {
+  if (input === undefined) return undefined;
+  const record = requireObjectRecord(input, pathLabel);
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (typeof value !== "string") {
+      throw new Error(`${pathLabel}.${key} must be a string.`);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function buildOrchestratorInterpolationContext(
+  session: OrchestratorTemplateSessionSpec
+): Record<string, string> {
+  const builtIns: Record<string, string> = {
+    n: String(session.sessionNumber),
+    nn: String(session.sessionNumber).padStart(2, "0"),
+    topic: session.topic,
+    sessionNumber: String(session.sessionNumber)
+  };
+
+  const custom = session.variables ?? {};
+  for (const key of Object.keys(custom)) {
+    if (Object.prototype.hasOwnProperty.call(builtIns, key)) {
+      throw new Error(`sessions.variables cannot override reserved placeholder "${key}".`);
+    }
+  }
+
+  return {
+    ...builtIns,
+    ...custom
+  };
+}
+
+function interpolateTemplateString(
+  input: string,
+  context: Record<string, string>,
+  pathLabel: string
+): string {
+  return input.replace(/\{([A-Za-z0-9_]+)\}/g, (_, key: string) => {
+    if (!Object.prototype.hasOwnProperty.call(context, key)) {
+      throw new Error(`Missing placeholder value for "${key}" at ${pathLabel}.`);
+    }
+    return context[key];
+  });
+}
+
+function interpolateOrchestratorPageContentBlock(
+  block: OrchestratorPageContentBlock,
+  context: Record<string, string>,
+  pathLabel: string
+): OrchestratorPageContentBlock {
+  switch (block.type) {
+    case "markdown":
+      return {
+        type: block.type,
+        value: interpolateTemplateString(block.value, context, `${pathLabel}.value`)
+      };
+    case "markdownFile":
+      return {
+        type: block.type,
+        path: interpolateTemplateString(block.path, context, `${pathLabel}.path`)
+      };
+    case "html":
+      return {
+        type: block.type,
+        value: interpolateTemplateString(block.value, context, `${pathLabel}.value`)
+      };
+    case "htmlFile":
+      return {
+        type: block.type,
+        path: interpolateTemplateString(block.path, context, `${pathLabel}.path`)
+      };
+    case "imageFile":
+      return {
+        type: block.type,
+        path: interpolateTemplateString(block.path, context, `${pathLabel}.path`),
+        alt: block.alt
+          ? interpolateTemplateString(block.alt, context, `${pathLabel}.alt`)
+          : undefined,
+        filesFolder: interpolateTemplateString(block.filesFolder, context, `${pathLabel}.filesFolder`)
+      };
+  }
+}
+
+function interpolateOrchestratorStep(
+  step: OrchestratorStep,
+  context: Record<string, string>,
+  pathLabel: string
+): OrchestratorStep {
+  switch (step.type) {
+    case "session-headers":
+      return {
+        type: step.type,
+        sessionNumber: step.sessionNumber
+      };
+    case "subheader":
+      return {
+        type: step.type,
+        title: interpolateTemplateString(step.title, context, `${pathLabel}.title`)
+      };
+    case "page":
+      return {
+        type: step.type,
+        title: interpolateTemplateString(step.title, context, `${pathLabel}.title`),
+        publish: step.publish,
+        afterHeaderTitle: step.afterHeaderTitle
+          ? interpolateTemplateString(step.afterHeaderTitle, context, `${pathLabel}.afterHeaderTitle`)
+          : undefined,
+        content: step.content.map((block, index) =>
+          interpolateOrchestratorPageContentBlock(block, context, `${pathLabel}.content[${index}]`)
+        )
+      };
+    case "today-section":
+      return {
+        type: step.type,
+        pageTitle: step.pageTitle
+          ? interpolateTemplateString(step.pageTitle, context, `${pathLabel}.pageTitle`)
+          : undefined,
+        notes: step.notes
+          ? interpolateTemplateString(step.notes, context, `${pathLabel}.notes`)
+          : undefined,
+        notesFile: step.notesFile
+          ? interpolateTemplateString(step.notesFile, context, `${pathLabel}.notesFile`)
+          : undefined,
+        imageUrl: step.imageUrl
+          ? interpolateTemplateString(step.imageUrl, context, `${pathLabel}.imageUrl`)
+          : undefined,
+        imageId: step.imageId,
+        imageFile: step.imageFile
+          ? interpolateTemplateString(step.imageFile, context, `${pathLabel}.imageFile`)
+          : undefined,
+        aiImagePrompt: step.aiImagePrompt
+          ? interpolateTemplateString(step.aiImagePrompt, context, `${pathLabel}.aiImagePrompt`)
+          : undefined,
+        publish: step.publish
+      };
+    case "task-a-section":
+    case "task-b-section":
+    case "task-c-section":
+      return {
+        type: step.type,
+        taskFolder: step.taskFolder
+          ? interpolateTemplateString(step.taskFolder, context, `${pathLabel}.taskFolder`)
+          : undefined,
+        pageTitle: step.pageTitle
+          ? interpolateTemplateString(step.pageTitle, context, `${pathLabel}.pageTitle`)
+          : undefined,
+        notes: step.notes
+          ? interpolateTemplateString(step.notes, context, `${pathLabel}.notes`)
+          : undefined,
+        notesFile: step.notesFile
+          ? interpolateTemplateString(step.notesFile, context, `${pathLabel}.notesFile`)
+          : undefined,
+        publish: step.publish
+      };
+    case "clone-survey":
+      return {
+        type: step.type,
+        sourceTitle: interpolateTemplateString(step.sourceTitle, context, `${pathLabel}.sourceTitle`),
+        title: interpolateTemplateString(step.title, context, `${pathLabel}.title`),
+        sourceCourseId: step.sourceCourseId,
+        afterHeaderTitle: step.afterHeaderTitle
+          ? interpolateTemplateString(step.afterHeaderTitle, context, `${pathLabel}.afterHeaderTitle`)
+          : undefined,
+        skipExisting: step.skipExisting
+      };
+    case "create-survey":
+      return {
+        type: step.type,
+        fromFile: interpolateTemplateString(step.fromFile, context, `${pathLabel}.fromFile`),
+        title: step.title
+          ? interpolateTemplateString(step.title, context, `${pathLabel}.title`)
+          : undefined,
+        afterHeaderTitle: step.afterHeaderTitle
+          ? interpolateTemplateString(step.afterHeaderTitle, context, `${pathLabel}.afterHeaderTitle`)
+          : undefined,
+        skipExisting: step.skipExisting,
+        publish: step.publish
+      };
+    case "create-quiz":
+      return {
+        type: step.type,
+        title: step.title
+          ? interpolateTemplateString(step.title, context, `${pathLabel}.title`)
+          : undefined,
+        fromFile: step.fromFile
+          ? interpolateTemplateString(step.fromFile, context, `${pathLabel}.fromFile`)
+          : undefined,
+        prompt: step.prompt
+          ? interpolateTemplateString(step.prompt, context, `${pathLabel}.prompt`)
+          : undefined,
+        promptFile: step.promptFile
+          ? interpolateTemplateString(step.promptFile, context, `${pathLabel}.promptFile`)
+          : undefined,
+        difficulty: step.difficulty,
+        afterHeaderTitle: step.afterHeaderTitle
+          ? interpolateTemplateString(step.afterHeaderTitle, context, `${pathLabel}.afterHeaderTitle`)
+          : undefined,
+        skipExisting: step.skipExisting,
+        publish: step.publish
+      };
+  }
+}
+
+function parseOrchestratorPageContentBlock(input: unknown, pathLabel: string): OrchestratorPageContentBlock {
+  const record = requireObjectRecord(input, pathLabel);
+  const type = requireNonEmptyString(record.type, `${pathLabel}.type`);
+  switch (type) {
+    case "markdown":
+      return {
+        type,
+        value: requireNonEmptyString(record.value, `${pathLabel}.value`)
+      };
+    case "markdownFile":
+      return {
+        type,
+        path: requireNonEmptyString(record.path, `${pathLabel}.path`)
+      };
+    case "html":
+      return {
+        type,
+        value: requireNonEmptyString(record.value, `${pathLabel}.value`)
+      };
+    case "htmlFile":
+      return {
+        type,
+        path: requireNonEmptyString(record.path, `${pathLabel}.path`)
+      };
+    case "imageFile":
+      return {
+        type,
+        path: requireNonEmptyString(record.path, `${pathLabel}.path`),
+        alt: optionalString(record.alt, `${pathLabel}.alt`),
+        filesFolder: requireNonEmptyString(record.filesFolder, `${pathLabel}.filesFolder`)
+      };
+    default:
+      throw new Error(`${pathLabel}.type "${type}" is not supported.`);
+  }
+}
+
+function parseOrchestratorStep(input: unknown, pathLabel: string): OrchestratorStep {
+  const record = requireObjectRecord(input, pathLabel);
+  const type = requireNonEmptyString(record.type, `${pathLabel}.type`);
+  switch (type) {
+    case "session-headers":
+      return {
+        type,
+        sessionNumber: optionalPositiveInteger(record.sessionNumber, `${pathLabel}.sessionNumber`)
+      };
+    case "subheader":
+      return {
+        type,
+        title: requireNonEmptyString(record.title, `${pathLabel}.title`)
+      };
+    case "page": {
+      const rawContent = record.content;
+      if (!Array.isArray(rawContent) || rawContent.length === 0) {
+        throw new Error(`${pathLabel}.content must be a non-empty array.`);
+      }
+      return {
+        type,
+        title: requireNonEmptyString(record.title, `${pathLabel}.title`),
+        publish: optionalBoolean(record.publish, `${pathLabel}.publish`),
+        afterHeaderTitle: optionalString(record.afterHeaderTitle, `${pathLabel}.afterHeaderTitle`),
+        content: rawContent.map((block, index) =>
+          parseOrchestratorPageContentBlock(block, `${pathLabel}.content[${index}]`)
+        )
+      };
+    }
+    case "today-section":
+      return {
+        type,
+        pageTitle: optionalString(record.pageTitle, `${pathLabel}.pageTitle`),
+        notes: optionalString(record.notes, `${pathLabel}.notes`),
+        notesFile: optionalString(record.notesFile, `${pathLabel}.notesFile`),
+        imageUrl: optionalString(record.imageUrl, `${pathLabel}.imageUrl`),
+        imageId: optionalPositiveInteger(record.imageId, `${pathLabel}.imageId`),
+        imageFile: optionalString(record.imageFile, `${pathLabel}.imageFile`),
+        aiImagePrompt: optionalString(record.aiImagePrompt, `${pathLabel}.aiImagePrompt`),
+        publish: optionalBoolean(record.publish, `${pathLabel}.publish`)
+      };
+    case "task-a-section":
+    case "task-b-section":
+    case "task-c-section":
+      return {
+        type,
+        taskFolder: optionalString(record.taskFolder, `${pathLabel}.taskFolder`),
+        pageTitle: optionalString(record.pageTitle, `${pathLabel}.pageTitle`),
+        notes: optionalString(record.notes, `${pathLabel}.notes`),
+        notesFile: optionalString(record.notesFile, `${pathLabel}.notesFile`),
+        publish: optionalBoolean(record.publish, `${pathLabel}.publish`)
+      };
+    case "clone-survey":
+      return {
+        type,
+        sourceTitle: requireNonEmptyString(record.sourceTitle, `${pathLabel}.sourceTitle`),
+        title: requireNonEmptyString(record.title, `${pathLabel}.title`),
+        sourceCourseId: optionalPositiveInteger(record.sourceCourseId, `${pathLabel}.sourceCourseId`),
+        afterHeaderTitle: optionalString(record.afterHeaderTitle, `${pathLabel}.afterHeaderTitle`),
+        skipExisting: optionalBoolean(record.skipExisting, `${pathLabel}.skipExisting`)
+      };
+    case "create-survey":
+      return {
+        type,
+        fromFile: requireNonEmptyString(record.fromFile, `${pathLabel}.fromFile`),
+        title: optionalString(record.title, `${pathLabel}.title`),
+        afterHeaderTitle: optionalString(record.afterHeaderTitle, `${pathLabel}.afterHeaderTitle`),
+        skipExisting: optionalBoolean(record.skipExisting, `${pathLabel}.skipExisting`),
+        publish: optionalBoolean(record.publish, `${pathLabel}.publish`)
+      };
+    case "create-quiz": {
+      const fromFile = optionalString(record.fromFile, `${pathLabel}.fromFile`);
+      const prompt = optionalString(record.prompt, `${pathLabel}.prompt`);
+      const promptFile = optionalString(record.promptFile, `${pathLabel}.promptFile`);
+      if (fromFile && (prompt || promptFile)) {
+        throw new Error(`${pathLabel} accepts either fromFile or prompt/promptFile, not both.`);
+      }
+      if (prompt && promptFile) {
+        throw new Error(`${pathLabel} accepts either prompt or promptFile, not both.`);
+      }
+      const difficultyRaw = optionalString(record.difficulty, `${pathLabel}.difficulty`);
+      if (fromFile && difficultyRaw) {
+        throw new Error(`${pathLabel}.difficulty can only be used with prompt-based quiz creation.`);
+      }
+      return {
+        type,
+        title: optionalString(record.title, `${pathLabel}.title`),
+        fromFile,
+        prompt,
+        promptFile,
+        difficulty: difficultyRaw ? parseQuizDifficulty(difficultyRaw, `${pathLabel}.difficulty`) : undefined,
+        afterHeaderTitle: optionalString(record.afterHeaderTitle, `${pathLabel}.afterHeaderTitle`),
+        skipExisting: optionalBoolean(record.skipExisting, `${pathLabel}.skipExisting`),
+        publish: optionalBoolean(record.publish, `${pathLabel}.publish`)
+      };
+    }
+    default:
+      throw new Error(`${pathLabel}.type "${type}" is not supported.`);
+  }
+}
+
+function parseOrchestratorModuleSpec(input: unknown, pathLabel: string): OrchestratorModuleSpec {
+  const moduleRecord = requireObjectRecord(input, pathLabel);
+  const rawSteps = moduleRecord.steps;
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+    throw new Error(`${pathLabel}.steps must be a non-empty array.`);
+  }
+  return {
+    name: requireNonEmptyString(moduleRecord.name, `${pathLabel}.name`),
+    sessionNumber: optionalPositiveInteger(moduleRecord.sessionNumber, `${pathLabel}.sessionNumber`),
+    position: optionalPositiveInteger(moduleRecord.position, `${pathLabel}.position`),
+    steps: rawSteps.map((stepInput, stepIndex) =>
+      parseOrchestratorStep(stepInput, `${pathLabel}.steps[${stepIndex}]`)
+    )
+  };
+}
+
+function parseOrchestratorModuleTemplateSpec(
+  input: unknown,
+  pathLabel: string
+): OrchestratorModuleTemplateSpec {
+  const templateRecord = requireObjectRecord(input, pathLabel);
+  const rawSteps = templateRecord.steps;
+  if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+    throw new Error(`${pathLabel}.steps must be a non-empty array.`);
+  }
+  return {
+    name: requireNonEmptyString(templateRecord.name, `${pathLabel}.name`),
+    position: optionalPositiveInteger(templateRecord.position, `${pathLabel}.position`),
+    steps: rawSteps.map((stepInput, stepIndex) =>
+      parseOrchestratorStep(stepInput, `${pathLabel}.steps[${stepIndex}]`)
+    )
+  };
+}
+
+function parseOrchestratorTemplateSessionSpec(
+  input: unknown,
+  pathLabel: string
+): OrchestratorTemplateSessionSpec {
+  const sessionRecord = requireObjectRecord(input, pathLabel);
+  const sessionNumber = optionalPositiveInteger(sessionRecord.sessionNumber, `${pathLabel}.sessionNumber`);
+  if (sessionNumber === undefined) {
+    throw new Error(`${pathLabel}.sessionNumber must be a positive integer.`);
+  }
+  return {
+    sessionNumber,
+    topic: requireNonEmptyString(sessionRecord.topic, `${pathLabel}.topic`),
+    position: optionalPositiveInteger(sessionRecord.position, `${pathLabel}.position`),
+    variables: optionalStringRecord(sessionRecord.variables, `${pathLabel}.variables`)
+  };
+}
+
+function expandOrchestratorModuleTemplate(
+  template: OrchestratorModuleTemplateSpec,
+  sessions: OrchestratorTemplateSessionSpec[]
+): OrchestratorModuleSpec[] {
+  return sessions.map((session, index) => {
+    const context = buildOrchestratorInterpolationContext(session);
+    return {
+      name: interpolateTemplateString(template.name, context, `blueprint.moduleTemplate.name`),
+      sessionNumber: session.sessionNumber,
+      position: session.position ?? template.position,
+      steps: template.steps.map((step, stepIndex) =>
+        interpolateOrchestratorStep(
+          step,
+          context,
+          `blueprint.moduleTemplate.steps[${stepIndex}] for sessions[${index}]`
+        )
+      )
+    };
+  });
+}
+
+function assertUniqueOrchestratorModuleNames(modules: OrchestratorModuleSpec[]): void {
+  const seen = new Set<string>();
+  for (const module of modules) {
+    const key = normalizeName(module.name);
+    if (seen.has(key)) {
+      throw new Error(`Duplicate module name in orchestration blueprint: "${module.name}".`);
+    }
+    seen.add(key);
+  }
+}
+
+function parseCourseOrchestratorBlueprint(input: unknown): OrchestratorBlueprint {
+  const record = requireObjectRecord(input, "blueprint");
+  const schemaVersion = requireNonEmptyString(record.schemaVersion, "blueprint.schemaVersion");
+  if (schemaVersion !== "course-orchestrator.v1" && schemaVersion !== "course-orchestrator.v2") {
+    throw new Error(`Unsupported blueprint.schemaVersion "${schemaVersion}".`);
+  }
+
+  const modules: OrchestratorModuleSpec[] = [];
+  if (Array.isArray(record.modules) && record.modules.length > 0) {
+    modules.push(
+      ...record.modules.map((moduleInput, moduleIndex) =>
+        parseOrchestratorModuleSpec(moduleInput, `blueprint.modules[${moduleIndex}]`)
+      )
+    );
+  }
+
+  if (schemaVersion === "course-orchestrator.v1") {
+    if (modules.length === 0) {
+      throw new Error("blueprint.modules must be a non-empty array.");
+    }
+    assertUniqueOrchestratorModuleNames(modules);
+    return {
+      schemaVersion: "course-orchestrator.v1",
+      modules
+    };
+  }
+
+  const hasTemplateInput = record.moduleTemplate !== undefined || record.sessions !== undefined;
+  if (hasTemplateInput) {
+    const template = parseOrchestratorModuleTemplateSpec(record.moduleTemplate, "blueprint.moduleTemplate");
+    if (!Array.isArray(record.sessions) || record.sessions.length === 0) {
+      throw new Error("blueprint.sessions must be a non-empty array.");
+    }
+    const sessions = record.sessions.map((sessionInput, sessionIndex) =>
+      parseOrchestratorTemplateSessionSpec(sessionInput, `blueprint.sessions[${sessionIndex}]`)
+    );
+    modules.push(...expandOrchestratorModuleTemplate(template, sessions));
+  }
+
+  if (modules.length === 0) {
+    throw new Error(
+      'course-orchestrator.v2 requires either a non-empty "modules" array or "moduleTemplate" with "sessions".'
+    );
+  }
+
+  assertUniqueOrchestratorModuleNames(modules);
+  return {
+    schemaVersion: "course-orchestrator.v2",
+    modules
+  };
+}
+
+async function runCourseOrchestrateWorkflow(input: {
+  courseId: number;
+  blueprintFilePath: string;
+  assetsRoot: string;
+  publish: boolean;
+  prepareAssets: boolean;
+  dryRun: boolean;
+}): Promise<void> {
+  const blueprintFilePath = path.resolve(input.blueprintFilePath);
+  const blueprintDir = path.dirname(blueprintFilePath);
+  const rawBlueprint = JSON.parse(await fs.readFile(blueprintFilePath, "utf8"));
+  const blueprint = parseCourseOrchestratorBlueprint(rawBlueprint);
+  const client = new CanvasClient();
+
+  console.log(`Course: ${input.courseId}`);
+  console.log(`Blueprint: ${blueprintFilePath}`);
+  console.log(`Session assets root: ${input.assetsRoot}`);
+  console.log(`Schema: ${blueprint.schemaVersion}`);
+  console.log(`Modules: ${blueprint.modules.length}`);
+  if (input.prepareAssets) {
+    console.log("Mode: prepare-assets");
+  } else if (input.dryRun) {
+    console.log("Mode: dry-run");
+  }
+
+  for (const moduleSpec of blueprint.modules) {
+    console.log("");
+    console.log(`== Module: ${moduleSpec.name}`);
+
+    if (input.prepareAssets) {
+      for (const step of moduleSpec.steps) {
+        console.log(`-- Step: ${step.type}`);
+        switch (step.type) {
+          case "create-quiz": {
+            const prepared = await buildPreparedCreateQuizStepInput(step, input.assetsRoot, blueprintDir);
+            if (prepared.quizFilePath) {
+              const quiz = await loadQuizFromFile(prepared.quizFilePath);
+              console.log(`Quiz JSON ok: ${prepared.quizFilePath} (${quiz.questions.length} question(s))`);
+            } else {
+              await prepareCreateQuizStepAssets({
+                sessionName: moduleSpec.name,
+                assetsRoot: input.assetsRoot,
+                promptText: prepared.promptText,
+                promptFilePath: prepared.promptFilePath
+              });
+            }
+            break;
+          }
+          case "today-section": {
+            const prepared = await buildPreparedTodaySectionStepInput(step, input.assetsRoot, blueprintDir);
+            await prepareTodaySectionStepAssets({
+              sessionName: moduleSpec.name,
+              assetsRoot: input.assetsRoot,
+              notesText: prepared.notesText,
+              notesFilePath: prepared.notesFilePath,
+              imageUrl: prepared.imageUrl,
+              imageId: prepared.imageId,
+              imageFilePath: prepared.imageFilePath,
+              aiImagePrompt: prepared.aiImagePrompt,
+              client
+            });
+            break;
+          }
+          case "task-a-section":
+          case "task-b-section":
+          case "task-c-section": {
+            const taskLetter = step.type === "task-a-section" ? "A" : step.type === "task-b-section" ? "B" : "C";
+            const taskLabel = `Task ${taskLetter}`;
+            const taskFolderName = await resolveTaskFolderName(
+              input.assetsRoot,
+              moduleSpec.name,
+              taskLetter,
+              taskLetter === "A"
+                ? TASK_A_DEFAULT_FOLDER_NAME
+                : taskLetter === "B"
+                  ? TASK_B_DEFAULT_FOLDER_NAME
+                  : TASK_C_DEFAULT_FOLDER_NAME,
+              step.taskFolder
+            );
+            const prepared = await buildPreparedTaskSectionStepInput(step, input.assetsRoot, blueprintDir);
+            const assets = await prepareTaskAAssets({
+              assetsRoot: input.assetsRoot,
+              sessionName: moduleSpec.name,
+              taskFolderName,
+              taskLabel,
+              notesText: prepared.notesText,
+              notesFilePath: prepared.notesFilePath
+            });
+            console.log(`Task assets: ${assets.folderPath}`);
+            console.log(assets.createdFiles.length > 0 ? `Created: ${assets.createdFiles.join(", ")}` : "Local task templates already present.");
+            console.log(
+              `Notes source: ${prepared.notesText ? "inline notes" : prepared.notesFilePath ? prepared.notesFilePath : assets.notesText ? "existing notes.md" : "placeholder"}`
+            );
+            break;
+          }
+          case "create-survey": {
+            const surveyFilePath = await resolveOrchestratorContentPath({
+              filePath: step.fromFile,
+              assetsRoot: input.assetsRoot,
+              blueprintDir
+            });
+            const survey = await loadSurveyFromFile(surveyFilePath);
+            console.log(`Survey JSON ok: ${surveyFilePath} (${survey.questions.length} question(s))`);
+            break;
+          }
+          case "page": {
+            const rendered = await renderOrchestratorPageHtml({
+              courseId: input.courseId,
+              blocks: step.content,
+              assetsRoot: input.assetsRoot,
+              blueprintDir,
+              dryRun: true
+            });
+            console.log(`Page content validated: ${step.title}`);
+            console.log(rendered.html.split("\n").slice(0, 6).join("\n"));
+            break;
+          }
+          default:
+            console.log("No local asset preparation required for this step.");
+            break;
+        }
+      }
+      continue;
+    }
+
+    const existingModule = await findExactModuleByNameIfExists(client, input.courseId, moduleSpec.name);
+    let moduleRef: CanvasModuleSummary | undefined = existingModule;
+
+    if (input.dryRun) {
+      if (existingModule) {
+        console.log(`Module exists: ${existingModule.name} (${existingModule.id})`);
+      } else {
+        console.log(`Module would be created${moduleSpec.position ? ` at position ${moduleSpec.position}` : ""}.`);
+      }
+    } else {
+      const ensured = await ensureModuleByName(client, input.courseId, moduleSpec.name, {
+        position: moduleSpec.position
+      });
+      moduleRef = ensured.module;
+      console.log(
+        ensured.created
+          ? `Created module: ${ensured.module.name} (${ensured.module.id})`
+          : `Using existing module: ${ensured.module.name} (${ensured.module.id})`
+      );
+    }
+
+    const moduleIsAddressable = Boolean(moduleRef);
+    for (const step of moduleSpec.steps) {
+      console.log(`-- Step: ${step.type}`);
+
+      if (!moduleIsAddressable && input.dryRun) {
+        if (step.type === "session-headers") {
+          const sessionNumber = step.sessionNumber ?? moduleSpec.sessionNumber;
+          if (!sessionNumber) {
+            throw new Error(`Module "${moduleSpec.name}" needs a sessionNumber for step "session-headers".`);
+          }
+          const config = await loadConfig();
+          const headers = buildSessionHeaderTitles(sessionNumber, config.sessions);
+          console.log("Dry run: module does not exist yet, planning headers:");
+          for (const title of headers) {
+            console.log(`- ${title}`);
+          }
+          continue;
+        }
+
+        if (step.type === "subheader") {
+          console.log(`Dry run: would create subheader "${step.title}" after module creation.`);
+          continue;
+        }
+
+        if (step.type === "page") {
+          const rendered = await renderOrchestratorPageHtml({
+            courseId: input.courseId,
+            blocks: step.content,
+            assetsRoot: input.assetsRoot,
+            blueprintDir,
+            dryRun: true
+          });
+          console.log(`Dry run: would create/update page "${step.title}" after module creation.`);
+          console.log("Generated HTML preview:");
+          console.log(rendered.html.split("\n").slice(0, 30).join("\n"));
+          continue;
+        }
+
+        if (step.type === "clone-survey") {
+          const sourceCourseId = step.sourceCourseId ?? input.courseId;
+          const source = await resolveExactQuizCloneSource({
+            client,
+            sourceCourseId,
+            sourceTitle: step.sourceTitle
+          });
+          const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, step.title);
+          console.log(
+            existingQuiz
+              ? `Dry run: existing survey "${step.title}" will be reused (${existingQuiz.id}).`
+              : `Dry run: survey "${step.title}" would be cloned from course ${sourceCourseId} after module creation.`
+          );
+          console.log(`Source survey: ${source.summary.title} (${source.summary.id})`);
+          if (step.afterHeaderTitle) {
+            console.log(`Dry run: survey would be placed under "${step.afterHeaderTitle}" after module creation.`);
+          }
+          continue;
+        }
+
+        if (step.type === "create-survey") {
+          const surveyFilePath = await resolveOrchestratorContentPath({
+            filePath: step.fromFile,
+            assetsRoot: input.assetsRoot,
+            blueprintDir
+          });
+          const survey = await loadSurveyFromFile(surveyFilePath);
+          const effectiveTitle = step.title ?? survey.title;
+          const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
+          console.log(
+            existingQuiz
+              ? `Dry run: existing survey "${effectiveTitle}" will be reused (${existingQuiz.id}).`
+              : `Dry run: survey "${effectiveTitle}" would be created after module creation from ${step.fromFile}.`
+          );
+          if (step.afterHeaderTitle) {
+            console.log(`Dry run: survey would be placed under "${step.afterHeaderTitle}" after module creation.`);
+          }
+          continue;
+        }
+
+        if (step.type === "create-quiz") {
+          const prepared = await buildPreparedCreateQuizStepInput(step, input.assetsRoot, blueprintDir);
+          if (prepared.quizFilePath) {
+            const quiz = await loadQuizFromFile(prepared.quizFilePath);
+            const effectiveTitle = step.title ?? quiz.title;
+            const existingQuiz = await findExactQuizByTitleIfExists(client, input.courseId, effectiveTitle);
+            console.log(
+              existingQuiz
+                ? `Dry run: existing quiz "${effectiveTitle}" will be reused (${existingQuiz.id}).`
+                : `Dry run: quiz "${effectiveTitle}" would be created after module creation from ${prepared.quizFilePath}.`
+            );
+          } else {
+            await prepareCreateQuizStepAssets({
+              sessionName: moduleSpec.name,
+              assetsRoot: input.assetsRoot,
+              promptText: prepared.promptText,
+              promptFilePath: prepared.promptFilePath
+            });
+            console.log("Dry run: quiz would be generated from the cloud agent after module creation.");
+          }
+          console.log(`Dry run: quiz would be placed under "${step.afterHeaderTitle ?? QUIZ_SECTION_ASSET_TITLE}" after module creation.`);
+          continue;
+        }
+
+        console.log("Dry run: full preview requires the module to exist first; step skipped.");
+        continue;
+      }
+
+      switch (step.type) {
+        case "session-headers": {
+          const sessionNumber = step.sessionNumber ?? moduleSpec.sessionNumber;
+          if (!sessionNumber) {
+            throw new Error(`Module "${moduleSpec.name}" needs a sessionNumber for step "session-headers".`);
+          }
+          await runSessionHeadersWorkflow({
+            courseId: input.courseId,
+            moduleName: moduleSpec.name,
+            sessionNumber,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+        }
+        case "subheader":
+          await runModuleSubHeaderWorkflow({
+            courseId: input.courseId,
+            moduleName: moduleSpec.name,
+            title: step.title,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+        case "page":
+          await runModulePageWorkflow({
+            courseId: input.courseId,
+            moduleName: moduleSpec.name,
+            title: step.title,
+            publish: step.publish ?? input.publish,
+            afterHeaderTitle: step.afterHeaderTitle,
+            content: step.content,
+            assetsRoot: input.assetsRoot,
+            blueprintDir,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+        case "today-section":
+          {
+          const prepared = await buildPreparedTodaySectionStepInput(step, input.assetsRoot, blueprintDir);
+          await runTodaySectionWorkflow({
+            courseId: input.courseId,
+            sessionName: moduleSpec.name,
+            pageTitle: step.pageTitle,
+            notesText: prepared.notesText,
+            notesFilePath: prepared.notesFilePath,
+            imageUrl: prepared.imageUrl,
+            imageId: prepared.imageId,
+            imageFilePath: prepared.imageFilePath,
+            aiImagePrompt: prepared.aiImagePrompt,
+            publish: step.publish ?? input.publish,
+            assetsRoot: input.assetsRoot,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+          }
+        case "task-a-section":
+        case "task-b-section":
+        case "task-c-section":
+          {
+          const prepared = await buildPreparedTaskSectionStepInput(step, input.assetsRoot, blueprintDir);
+          await runTaskSectionWorkflow({
+            courseId: input.courseId,
+            sessionName: moduleSpec.name,
+            taskLetter: step.type === "task-a-section" ? "A" : step.type === "task-b-section" ? "B" : "C",
+            taskFolder: step.taskFolder,
+            pageTitle: step.pageTitle,
+            notesText: prepared.notesText,
+            notesFilePath: prepared.notesFilePath,
+            publish: step.publish ?? input.publish,
+            assetsRoot: input.assetsRoot,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+          }
+        case "clone-survey":
+          await runModuleCloneSurveyWorkflow({
+            courseId: input.courseId,
+            moduleName: moduleSpec.name,
+            sourceCourseId: step.sourceCourseId ?? input.courseId,
+            sourceTitle: step.sourceTitle,
+            title: step.title,
+            afterHeaderTitle: step.afterHeaderTitle,
+            skipExisting: step.skipExisting ?? true,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+        case "create-survey":
+          await runCreateSurveyWorkflow({
+            courseId: input.courseId,
+            surveyFilePath: await resolveOrchestratorContentPath({
+              filePath: step.fromFile,
+              assetsRoot: input.assetsRoot,
+              blueprintDir
+            }),
+            title: step.title,
+            publish: step.publish ?? input.publish,
+            skipExisting: step.skipExisting ?? true,
+            moduleName: moduleSpec.name,
+            afterHeaderTitle: step.afterHeaderTitle,
+            dryRun: input.dryRun,
+            client
+          });
+          break;
+        case "create-quiz": {
+          const prepared = await buildPreparedCreateQuizStepInput(step, input.assetsRoot, blueprintDir);
+          await runCreateQuizWorkflow({
+            courseId: input.courseId,
+            title: step.title,
+            quizFilePath: prepared.quizFilePath,
+            promptText: prepared.promptText,
+            promptFilePath: prepared.promptFilePath,
+            difficulty: prepared.difficulty,
+            publish: step.publish ?? input.publish,
+            skipExisting: step.skipExisting ?? true,
+            moduleName: moduleSpec.name,
+            afterHeaderTitle: step.afterHeaderTitle,
+            dryRun: input.dryRun,
+            sessionName: moduleSpec.name,
+            assetsRoot: input.assetsRoot,
+            client
+          });
+          break;
+        }
+      }
+    }
+  }
+}
+
 program.command("create")
   .description("Create a quiz in Canvas from a JSON file or from an agent prompt.")
   .option("--course-id <id>", "Canvas course id to upload to", String(env.canvasTestCourseId))
   .option("--from-file <path>", "Load Nexgen quiz JSON from file")
   .option("--prompt <text>", "Generate quiz from agent using a prompt")
+  .option("--prompt-file <path>", "Generate quiz from agent using a prompt file")
+  .option("--title <title>", "Optional title override")
+  .option("--module-name <name>", "Optional module name to place the quiz into")
+  .option("--after-header-title <title>", "Optional subheader title to place the quiz after. Requires --module-name.")
+  .option("--publish", "Publish quiz after create. Default is unpublished.", false)
+  .option("--skip-existing", "Reuse an existing quiz with the same target title.", false)
   .option("--difficulty <level>", "Difficulty for agent-generated quiz: easy, medium, hard, or mixed")
   .option("--dry-run", "Validate and show a summary without uploading", false)
   .action(async (opts) => {
     const courseId = Number(opts.courseId);
 
-    if (!opts.fromFile && !opts.prompt) {
-      throw new Error("Provide either --from-file or --prompt.");
+    if (!opts.fromFile && !opts.prompt && !opts.promptFile) {
+      throw new Error("Provide one of --from-file, --prompt, or --prompt-file.");
     }
-    if (opts.fromFile && opts.prompt) {
-      throw new Error("Provide only one of --from-file or --prompt.");
+    if ([opts.fromFile, opts.prompt, opts.promptFile].filter(Boolean).length > 1) {
+      throw new Error("Provide only one source: --from-file, --prompt, or --prompt-file.");
     }
     if (opts.fromFile && opts.difficulty) {
-      throw new Error("--difficulty can only be used with --prompt.");
+      throw new Error("--difficulty can only be used with --prompt or --prompt-file.");
+    }
+    if (opts.afterHeaderTitle && !opts.moduleName) {
+      throw new Error("--after-header-title requires --module-name.");
     }
 
     const difficulty = opts.difficulty
       ? parseQuizDifficulty(String(opts.difficulty), "--difficulty")
       : undefined;
 
-    let raw: unknown;
-
-    if (opts.fromFile) {
-      const txt = await fs.readFile(String(opts.fromFile), "utf8");
-      raw = JSON.parse(txt);
-    } else {
-      raw = await generateQuizFromAgent(String(opts.prompt), { difficulty });
-    }
-
-    const quiz = validateNexgenQuiz(raw);
-    const mapped = mapToCanvasQuiz(quiz);
-
-    console.log(`Quiz: ${quiz.title}`);
-    console.log(`Questions: ${quiz.questions.length} (expected 5)`);
-    console.log(`Target course: ${courseId}`);
-    if (difficulty) {
-      console.log(`Requested difficulty: ${difficulty}`);
-    }
-    if (opts.dryRun) {
-      console.log("Dry run: no upload performed.");
-      return;
-    }
-
-    const client = new CanvasClient();
-    const created = await client.createQuiz(courseId, mapped.canvasQuiz);
-
-    for (const q of mapped.canvasQuestions) {
-      await client.addQuizQuestion(courseId, created.id, q);
-    }
-
-    if (mapped.canvasQuiz.published === false) {
-      try {
-        await client.updateQuiz(courseId, created.id, { published: true });
-        await client.updateQuiz(courseId, created.id, { published: false });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.warn(`Warning: unable to refresh quiz question count. You can publish/unpublish manually. ${message}`);
-      }
-    }
-
-    const urlGuess = created.html_url ?? `${env.canvasBaseUrl}/courses/${courseId}/quizzes/${created.id}`;
-    console.log(`Created quiz id: ${created.id}`);
-    console.log(`Quiz URL: ${urlGuess}`);
+    await runCreateQuizWorkflow({
+      courseId,
+      title: opts.title ? String(opts.title) : undefined,
+      quizFilePath: opts.fromFile ? path.resolve(String(opts.fromFile)) : undefined,
+      promptText: opts.prompt ? String(opts.prompt) : undefined,
+      promptFilePath: opts.promptFile ? path.resolve(String(opts.promptFile)) : undefined,
+      difficulty,
+      publish: Boolean(opts.publish),
+      skipExisting: Boolean(opts.skipExisting),
+      moduleName: opts.moduleName ? String(opts.moduleName) : undefined,
+      afterHeaderTitle: opts.afterHeaderTitle ? String(opts.afterHeaderTitle) : undefined,
+      dryRun: Boolean(opts.dryRun)
+    });
   });
 
 program.command("course-files-scaffold")
@@ -1834,6 +4827,37 @@ program.command("course-files-scaffold")
     }
   });
 
+program.command("create-survey")
+  .description("Create an ungraded or graded survey in Canvas from a survey JSON file.")
+  .requiredOption("--from-file <path>", "Path to the Nexgen survey JSON file")
+  .option("--title <title>", "Override survey title")
+  .option("--module-name <name>", "Optional module name to place the survey into")
+  .option("--after-header-title <title>", "Optional subheader title to place the survey after")
+  .option("--publish", "Publish survey after create/update (default is unpublished)", false)
+  .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
+  .option("--skip-existing", "Reuse an existing survey with the same target title", false)
+  .option("--dry-run", "Show planned survey creation and placement without Canvas writes", false)
+  .action(async (opts) => {
+    const courseId = Number(opts.courseId);
+    if (!Number.isFinite(courseId)) {
+      throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
+    }
+    if (opts.afterHeaderTitle && !opts.moduleName) {
+      throw new Error("--after-header-title requires --module-name.");
+    }
+
+    await runCreateSurveyWorkflow({
+      courseId,
+      surveyFilePath: path.resolve(String(opts.fromFile)),
+      title: opts.title ? String(opts.title) : undefined,
+      publish: Boolean(opts.publish),
+      skipExisting: Boolean(opts.skipExisting),
+      moduleName: opts.moduleName ? String(opts.moduleName) : undefined,
+      afterHeaderTitle: opts.afterHeaderTitle ? String(opts.afterHeaderTitle) : undefined,
+      dryRun: Boolean(opts.dryRun)
+    });
+  });
+
 program.command("session-headers")
   .description("Create session text headers inside an existing Canvas module.")
   .requiredOption("--module-name <name>", "Canvas module name to add headers to")
@@ -1847,30 +4871,12 @@ program.command("session-headers")
     }
 
     const sessionNumber = Number(opts.session);
-    const config = await loadConfig();
-    const headers = buildSessionHeaderTitles(sessionNumber, config.sessions);
-    const moduleName = String(opts.moduleName);
-
-    const client = new CanvasClient();
-    const module = await resolveModuleByName(client, courseId, moduleName);
-
-    console.log(`Module: ${module.name} (${module.id})`);
-    console.log(`Session: ${String(sessionNumber).padStart(2, "0")}`);
-    console.log("Headers:");
-    for (const title of headers) {
-      console.log(`- ${title}`);
-    }
-
-    if (opts.dryRun) {
-      console.log("Dry run: no module items created.");
-      return;
-    }
-
-    for (const title of headers) {
-      await client.createModuleSubHeader(courseId, module.id, title);
-    }
-
-    console.log("Session headers created.");
+    await runSessionHeadersWorkflow({
+      courseId,
+      moduleName: String(opts.moduleName),
+      sessionNumber,
+      dryRun: Boolean(opts.dryRun)
+    });
   });
 
 program.command("clone-survey")
@@ -1880,6 +4886,7 @@ program.command("clone-survey")
   .option("--range <start-end>", "Inclusive session number range (for example, 2-7)")
   .option("--sessions <numbers>", "Comma-separated session numbers (for example, 2,3,5)")
   .option("--pad <number>", "Zero-padding width for {nn}", "2")
+  .option("--source-course-id <id>", "Canvas course id to clone the source quiz/survey from")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
   .option("--skip-existing", "Skip generated titles that already exist in the course", false)
   .option("--dry-run", "Show planned copies without creating quizzes", false)
@@ -1899,89 +4906,22 @@ program.command("clone-survey")
       opts.range ? String(opts.range) : undefined,
       opts.sessions ? String(opts.sessions) : undefined
     );
-    const client = new CanvasClient();
-
-    const sourceCandidates = await client.listQuizzes(courseId, sourceTitle);
-    const sourceMatches = sourceCandidates.filter((quiz) => normalizeName(quiz.title) === normalizeName(sourceTitle));
-    if (sourceMatches.length === 0) {
-      const suggestions = sourceCandidates.map((quiz) => quiz.title).join(", ");
-      if (!suggestions) {
-        throw new Error(`No quizzes found matching "${sourceTitle}".`);
-      }
-      throw new Error(`No exact source quiz match for "${sourceTitle}". Closest matches: ${suggestions}`);
-    }
-    if (sourceMatches.length > 1) {
-      const names = sourceMatches.map((quiz) => `${quiz.title} (${quiz.id})`).join(", ");
-      throw new Error(`Multiple source quizzes matched "${sourceTitle}": ${names}`);
-    }
-
-    const sourceQuizSummary = sourceMatches[0];
-    const sourceQuiz = await client.getQuiz(courseId, sourceQuizSummary.id);
-    const sourceQuestions = await client.listQuizQuestions(courseId, sourceQuizSummary.id);
-
-    const rawTemplate = opts.titleTemplate
-      ? String(opts.titleTemplate)
-      : deriveTitleTemplate(sourceQuizSummary.title);
+    const sourceCourseId = opts.sourceCourseId
+      ? parsePositiveInteger(String(opts.sourceCourseId), "--source-course-id")
+      : courseId;
+    const rawTemplate = opts.titleTemplate ? String(opts.titleTemplate) : deriveTitleTemplate(sourceTitle);
     const titleTemplate = ensureTemplateToken(rawTemplate);
-    const planned = sessionNumbers.map((sessionNumber) => ({
-      sessionNumber,
-      title: renderTitle(titleTemplate, sessionNumber, pad)
-    }));
 
-    const duplicatePlannedTitle = planned.find((item, index) =>
-      planned.findIndex((other) => normalizeName(other.title) === normalizeName(item.title)) !== index
-    );
-    if (duplicatePlannedTitle) {
-      throw new Error(`Generated duplicate title "${duplicatePlannedTitle.title}". Adjust --title-template.`);
-    }
-
-    const existingQuizzes = await client.listQuizzes(courseId);
-    const existingTitleSet = new Set(existingQuizzes.map((quiz) => normalizeName(quiz.title)));
-    const existingTargets = planned.filter((item) => existingTitleSet.has(normalizeName(item.title)));
-    if (existingTargets.length > 0 && !opts.skipExisting) {
-      const names = existingTargets.map((item) => item.title).join(", ");
-      throw new Error(`Generated titles already exist: ${names}. Use --skip-existing to continue.`);
-    }
-
-    console.log(`Course: ${courseId}`);
-    console.log(`Source quiz: ${sourceQuizSummary.title} (${sourceQuizSummary.id})`);
-    console.log(`Source type: ${sourceQuiz.quiz_type ?? "assignment"}`);
-    console.log(`Questions to copy: ${sourceQuestions.length}`);
-    console.log(`Title template: ${titleTemplate}`);
-    console.log("Planned copies:");
-    for (const item of planned) {
-      const exists = existingTitleSet.has(normalizeName(item.title));
-      console.log(`- Session ${String(item.sessionNumber).padStart(pad, "0")}: ${item.title}${exists ? " [exists]" : ""}`);
-    }
-
-    if (opts.dryRun) {
-      console.log("Dry run: no quizzes created.");
-      return;
-    }
-
-    const skipped: string[] = [];
-    const created: Array<{ id: number; title: string; html_url?: string }> = [];
-    for (const item of planned) {
-      if (existingTitleSet.has(normalizeName(item.title))) {
-        if (opts.skipExisting) {
-          skipped.push(item.title);
-          continue;
-        }
-      }
-
-      const newQuiz = await client.createQuiz(courseId, buildQuizCloneInput(sourceQuiz as Record<string, unknown>, item.title));
-      for (const sourceQuestion of sourceQuestions) {
-        await client.addQuizQuestion(courseId, newQuiz.id, sanitizeQuestionForCreate(sourceQuestion));
-      }
-      created.push(newQuiz);
-      existingTitleSet.add(normalizeName(item.title));
-      console.log(`Created: ${item.title} (${newQuiz.id})`);
-    }
-
-    console.log(`Created ${created.length} quiz copy/copies.`);
-    if (skipped.length > 0) {
-      console.log(`Skipped ${skipped.length} existing title(s): ${skipped.join(", ")}`);
-    }
+    await runCloneSurveyBatchWorkflow({
+      sourceCourseId,
+      targetCourseId: courseId,
+      sourceTitle,
+      titleTemplate,
+      sessionNumbers,
+      pad,
+      skipExisting: Boolean(opts.skipExisting),
+      dryRun: Boolean(opts.dryRun)
+    });
   });
 
 program.command("teacher-notes")
@@ -2004,6 +4944,13 @@ program.command("teacher-notes")
       ? `${rawPageTitle} (Draft)`
       : rawPageTitle;
     const client = new CanvasClient();
+    const sessionMeta = parseSessionMetadata(sessionName);
+    const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
+      client,
+      courseId,
+      sessionMeta,
+      dryRun: Boolean(opts.dryRun)
+    });
 
     const built = await buildTeacherNotesForSession(client, courseId, sessionName, pageTitle);
 
@@ -2013,6 +4960,15 @@ program.command("teacher-notes")
     console.log(`Source pages: ${built.modulePages.length}`);
     console.log(`Teacher notes title: ${pageTitle}`);
     console.log(`Target module position: ${built.insertionPosition}`);
+    if (filesScaffoldResult && (opts.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
+      console.log(
+        `${opts.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+        `${filesScaffoldResult.createdPaths.length}`
+      );
+      for (const folderPath of filesScaffoldResult.createdPaths) {
+        console.log(`+ ${folderPath}`);
+      }
+    }
 
     if (opts.dryRun) {
       console.log("Dry run: no Canvas updates performed.");
@@ -2088,15 +5044,22 @@ program.command("teacher-notes")
         await client.createModulePageItem(courseId, built.module.id, {
           title: pageTitle,
           pageUrl,
-          position: built.insertionPosition
+          position: built.insertionPosition,
+          indent: MODULE_ITEM_DEFAULT_INDENT
         });
         createdModuleItem = true;
-      } else if (moduleItemForPage.position !== built.insertionPosition) {
+      } else if (
+        moduleItemForPage.position !== built.insertionPosition ||
+        (moduleItemForPage.indent ?? 0) !== MODULE_ITEM_DEFAULT_INDENT ||
+        normalize(moduleItemForPage.title) !== normalize(pageTitle)
+      ) {
         await client.updateModuleItemPosition(
           courseId,
           built.module.id,
           moduleItemForPage.id,
-          built.insertionPosition
+          built.insertionPosition,
+          MODULE_ITEM_DEFAULT_INDENT,
+          pageTitle
         );
         movedModuleItem = true;
       }
@@ -2138,199 +5101,18 @@ program.command("task-a-section")
       throw new Error("Use either --notes or --notes-file, not both.");
     }
 
-    const sessionName = String(opts.sessionName);
-    const sessionMeta = parseSessionMetadata(sessionName);
-    const shouldPublish = Boolean(opts.publish);
-    const assetsRoot = path.resolve(String(opts.assetsRoot));
-    const taskFolderName = await resolveTaskFolderName(
-      assetsRoot,
-      sessionName,
-      "A",
-      TASK_A_DEFAULT_FOLDER_NAME,
-      opts.taskFolder ? String(opts.taskFolder) : undefined
-    );
-
-    const assets = await prepareTaskAAssets({
-      assetsRoot,
-      sessionName,
-      taskFolderName,
+    await runTaskSectionWorkflow({
+      courseId,
+      sessionName: String(opts.sessionName),
+      taskLetter: "A",
+      taskFolder: opts.taskFolder ? String(opts.taskFolder) : undefined,
+      pageTitle: opts.pageTitle ? String(opts.pageTitle) : undefined,
       notesText: opts.notes ? String(opts.notes) : undefined,
-      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
+      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined,
+      publish: Boolean(opts.publish),
+      assetsRoot: path.resolve(String(opts.assetsRoot)),
+      dryRun: Boolean(opts.dryRun)
     });
-
-    const pageTitle = opts.pageTitle
-      ? String(opts.pageTitle)
-      : assets.pageTitle ?? `${sessionMeta.topic} - Task A`;
-    const taskTitle = pageTitle;
-
-    const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
-    const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
-    let uploadedLocalMediaFolderPath: string | undefined;
-
-    if (!opts.dryRun && assets.localMedia.length > 0) {
-      if (!sessionMeta.sessionNumberPadded) {
-        throw new Error(
-          `Cannot map session name "${sessionName}" to a Session_NN/task_a files folder for media upload.`
-        );
-      }
-      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_a");
-      uploadedLocalMediaFolderPath = sessionFolderPath;
-      for (const local of assets.localMedia) {
-        const fileData = Buffer.from(await fs.readFile(local.absolutePath));
-        const uploaded = await uploadFileToCanvasSessionFolder({
-          courseId,
-          sessionFolderPath,
-          fileName: local.fileName,
-          contentType: local.contentType,
-          data: fileData
-        });
-        mediaAssets.push({
-          url: uploaded.url,
-          kind: local.kind,
-          label: local.relativePath
-        });
-        uploadedLocalMedia.push({
-          source: local.relativePath,
-          uploadedUrl: uploaded.url,
-          id: uploaded.id
-        });
-      }
-    } else {
-      for (const local of assets.localMedia) {
-        mediaAssets.push({
-          url: local.relativePath,
-          kind: local.kind,
-          label: local.relativePath
-        });
-      }
-    }
-
-    const notesBody = normalizeTaskBlockText(assets.authoredBodyText ?? assets.notesText);
-    if (!notesBody) {
-      throw new Error("Task A notes.md is empty. Add student-facing content and processor tags, then retry.");
-    }
-    const mediaLookup = buildTaskAMediaLookup(mediaAssets);
-    const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
-      notesBody,
-      mediaLookup,
-      iframeTemplate: assets.iframeTemplate,
-      youtubeEmbedWidth: assets.youtubeEmbedWidth
-    });
-    const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
-
-    const client = new CanvasClient();
-    const built = await buildTaskASection(client, courseId, sessionName, {
-      pageTitle,
-      taskTitle,
-      bodyMarkdown: finalTaskBodyMarkdown,
-      suppressTaskTitleHeading: true,
-      disableAutoMediaSection: true,
-      calloutStyles: finalCalloutStyles,
-      mediaAssets
-    });
-
-    console.log(`Course: ${courseId}`);
-    console.log(`Session module: ${built.module.name} (${built.module.id})`);
-    console.log(`Task A header: ${built.taskHeaderTitle}`);
-    console.log(`Task folder: ${taskFolderName}`);
-    console.log(`Assets folder: ${assets.folderPath}`);
-    console.log(`Page title: ${pageTitle}`);
-    console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
-    if (assets.createdFiles.length > 0) {
-      console.log("Created local asset templates:");
-      for (const createdPath of assets.createdFiles) {
-        console.log(`- ${createdPath}`);
-      }
-    }
-    console.log("Task body source: notes.md markdown/legacy compatible mode");
-    console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
-    console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
-    console.log(`Media URLs: ${assets.mediaUrls.length}`);
-    console.log(`Local media files: ${assets.localMedia.length}`);
-    console.log(`Media references resolved: ${mediaLookup.size}`);
-    console.log(`Target module position: ${built.insertionPosition}`);
-
-    if (opts.dryRun) {
-      if (assets.localMedia.length > 0) {
-        console.log("Dry run: local media files are not uploaded.");
-      }
-      console.log("Dry run: no Canvas updates performed.");
-      console.log("Generated HTML preview:");
-      console.log(built.sectionHtml.split("\n").slice(0, 60).join("\n"));
-      return;
-    }
-
-    if (uploadedLocalMedia.length > 0) {
-      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_a";
-      console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
-      for (const uploaded of uploadedLocalMedia) {
-        console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
-      }
-    }
-
-    const normalize = (v: string): string => v.trim().toLowerCase();
-    const existingModulePage = built.moduleItems.find(
-      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
-    );
-
-    let pageUrl: string;
-    let createdPage = false;
-    let createdModuleItem = false;
-    let movedModuleItem = false;
-
-    if (existingModulePage?.page_url) {
-      pageUrl = existingModulePage.page_url;
-      await client.updatePage(courseId, pageUrl, {
-        title: pageTitle,
-        body: built.sectionHtml,
-        published: shouldPublish
-      });
-    } else {
-      const pages = await client.listPages(courseId, pageTitle);
-      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
-      if (existingPage) {
-        pageUrl = existingPage.url;
-        await client.updatePage(courseId, pageUrl, {
-          title: pageTitle,
-          body: built.sectionHtml,
-          published: shouldPublish
-        });
-      } else {
-        const created = await client.createPage(courseId, {
-          title: pageTitle,
-          body: built.sectionHtml,
-          published: shouldPublish
-        });
-        pageUrl = created.url;
-        createdPage = true;
-      }
-    }
-
-    const moduleItemForPage = built.moduleItems.find(
-      (item) => item.type === "Page" && item.page_url === pageUrl
-    );
-    if (!moduleItemForPage) {
-      await client.createModulePageItem(courseId, built.module.id, {
-        title: pageTitle,
-        pageUrl,
-        position: built.insertionPosition
-      });
-      createdModuleItem = true;
-    } else if (moduleItemForPage.position !== built.insertionPosition) {
-      await client.updateModuleItemPosition(
-        courseId,
-        built.module.id,
-        moduleItemForPage.id,
-        built.insertionPosition
-      );
-      movedModuleItem = true;
-    }
-
-    console.log(createdPage ? "Created page." : "Updated existing page.");
-    if (createdModuleItem) console.log("Added page to session module.");
-    if (movedModuleItem) console.log("Moved module item to target section.");
-    if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
-    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
   });
 
 program.command("task-b-section")
@@ -2358,199 +5140,18 @@ program.command("task-b-section")
       throw new Error("Use either --notes or --notes-file, not both.");
     }
 
-    const sessionName = String(opts.sessionName);
-    const sessionMeta = parseSessionMetadata(sessionName);
-    const shouldPublish = Boolean(opts.publish);
-    const assetsRoot = path.resolve(String(opts.assetsRoot));
-    const taskFolderName = await resolveTaskFolderName(
-      assetsRoot,
-      sessionName,
-      "B",
-      TASK_B_DEFAULT_FOLDER_NAME,
-      opts.taskFolder ? String(opts.taskFolder) : undefined
-    );
-
-    const assets = await prepareTaskAAssets({
-      assetsRoot,
-      sessionName,
-      taskFolderName,
+    await runTaskSectionWorkflow({
+      courseId,
+      sessionName: String(opts.sessionName),
+      taskLetter: "B",
+      taskFolder: opts.taskFolder ? String(opts.taskFolder) : undefined,
+      pageTitle: opts.pageTitle ? String(opts.pageTitle) : undefined,
       notesText: opts.notes ? String(opts.notes) : undefined,
-      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
+      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined,
+      publish: Boolean(opts.publish),
+      assetsRoot: path.resolve(String(opts.assetsRoot)),
+      dryRun: Boolean(opts.dryRun)
     });
-
-    const pageTitle = opts.pageTitle
-      ? String(opts.pageTitle)
-      : assets.pageTitle ?? `${sessionMeta.topic} - Task B`;
-    const taskTitle = pageTitle;
-
-    const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
-    const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
-    let uploadedLocalMediaFolderPath: string | undefined;
-
-    if (!opts.dryRun && assets.localMedia.length > 0) {
-      if (!sessionMeta.sessionNumberPadded) {
-        throw new Error(
-          `Cannot map session name "${sessionName}" to a Session_NN/task_b files folder for media upload.`
-        );
-      }
-      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_b");
-      uploadedLocalMediaFolderPath = sessionFolderPath;
-      for (const local of assets.localMedia) {
-        const fileData = Buffer.from(await fs.readFile(local.absolutePath));
-        const uploaded = await uploadFileToCanvasSessionFolder({
-          courseId,
-          sessionFolderPath,
-          fileName: local.fileName,
-          contentType: local.contentType,
-          data: fileData
-        });
-        mediaAssets.push({
-          url: uploaded.url,
-          kind: local.kind,
-          label: local.relativePath
-        });
-        uploadedLocalMedia.push({
-          source: local.relativePath,
-          uploadedUrl: uploaded.url,
-          id: uploaded.id
-        });
-      }
-    } else {
-      for (const local of assets.localMedia) {
-        mediaAssets.push({
-          url: local.relativePath,
-          kind: local.kind,
-          label: local.relativePath
-        });
-      }
-    }
-
-    const notesBody = normalizeTaskBlockText(assets.authoredBodyText ?? assets.notesText);
-    if (!notesBody) {
-      throw new Error("Task B notes.md is empty. Add student-facing content and processor tags, then retry.");
-    }
-    const mediaLookup = buildTaskAMediaLookup(mediaAssets);
-    const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
-      notesBody,
-      mediaLookup,
-      iframeTemplate: assets.iframeTemplate,
-      youtubeEmbedWidth: assets.youtubeEmbedWidth
-    });
-    const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
-
-    const client = new CanvasClient();
-    const built = await buildTaskBSection(client, courseId, sessionName, {
-      pageTitle,
-      taskTitle,
-      bodyMarkdown: finalTaskBodyMarkdown,
-      suppressTaskTitleHeading: true,
-      disableAutoMediaSection: true,
-      calloutStyles: finalCalloutStyles,
-      mediaAssets
-    });
-
-    console.log(`Course: ${courseId}`);
-    console.log(`Session module: ${built.module.name} (${built.module.id})`);
-    console.log(`Task B header: ${built.taskHeaderTitle}`);
-    console.log(`Task folder: ${taskFolderName}`);
-    console.log(`Assets folder: ${assets.folderPath}`);
-    console.log(`Page title: ${pageTitle}`);
-    console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
-    if (assets.createdFiles.length > 0) {
-      console.log("Created local asset templates:");
-      for (const createdPath of assets.createdFiles) {
-        console.log(`- ${createdPath}`);
-      }
-    }
-    console.log("Task body source: notes.md markdown/legacy compatible mode");
-    console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
-    console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
-    console.log(`Media URLs: ${assets.mediaUrls.length}`);
-    console.log(`Local media files: ${assets.localMedia.length}`);
-    console.log(`Media references resolved: ${mediaLookup.size}`);
-    console.log(`Target module position: ${built.insertionPosition}`);
-
-    if (opts.dryRun) {
-      if (assets.localMedia.length > 0) {
-        console.log("Dry run: local media files are not uploaded.");
-      }
-      console.log("Dry run: no Canvas updates performed.");
-      console.log("Generated HTML preview:");
-      console.log(built.sectionHtml.split("\n").slice(0, 60).join("\n"));
-      return;
-    }
-
-    if (uploadedLocalMedia.length > 0) {
-      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_b";
-      console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
-      for (const uploaded of uploadedLocalMedia) {
-        console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
-      }
-    }
-
-    const normalize = (v: string): string => v.trim().toLowerCase();
-    const existingModulePage = built.moduleItems.find(
-      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
-    );
-
-    let pageUrl: string;
-    let createdPage = false;
-    let createdModuleItem = false;
-    let movedModuleItem = false;
-
-    if (existingModulePage?.page_url) {
-      pageUrl = existingModulePage.page_url;
-      await client.updatePage(courseId, pageUrl, {
-        title: pageTitle,
-        body: built.sectionHtml,
-        published: shouldPublish
-      });
-    } else {
-      const pages = await client.listPages(courseId, pageTitle);
-      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
-      if (existingPage) {
-        pageUrl = existingPage.url;
-        await client.updatePage(courseId, pageUrl, {
-          title: pageTitle,
-          body: built.sectionHtml,
-          published: shouldPublish
-        });
-      } else {
-        const created = await client.createPage(courseId, {
-          title: pageTitle,
-          body: built.sectionHtml,
-          published: shouldPublish
-        });
-        pageUrl = created.url;
-        createdPage = true;
-      }
-    }
-
-    const moduleItemForPage = built.moduleItems.find(
-      (item) => item.type === "Page" && item.page_url === pageUrl
-    );
-    if (!moduleItemForPage) {
-      await client.createModulePageItem(courseId, built.module.id, {
-        title: pageTitle,
-        pageUrl,
-        position: built.insertionPosition
-      });
-      createdModuleItem = true;
-    } else if (moduleItemForPage.position !== built.insertionPosition) {
-      await client.updateModuleItemPosition(
-        courseId,
-        built.module.id,
-        moduleItemForPage.id,
-        built.insertionPosition
-      );
-      movedModuleItem = true;
-    }
-
-    console.log(createdPage ? "Created page." : "Updated existing page.");
-    if (createdModuleItem) console.log("Added page to session module.");
-    if (movedModuleItem) console.log("Moved module item to target section.");
-    if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
-    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
   });
 
 program.command("task-c-section")
@@ -2578,199 +5179,18 @@ program.command("task-c-section")
       throw new Error("Use either --notes or --notes-file, not both.");
     }
 
-    const sessionName = String(opts.sessionName);
-    const sessionMeta = parseSessionMetadata(sessionName);
-    const shouldPublish = Boolean(opts.publish);
-    const assetsRoot = path.resolve(String(opts.assetsRoot));
-    const taskFolderName = await resolveTaskFolderName(
-      assetsRoot,
-      sessionName,
-      "C",
-      TASK_C_DEFAULT_FOLDER_NAME,
-      opts.taskFolder ? String(opts.taskFolder) : undefined
-    );
-
-    const assets = await prepareTaskAAssets({
-      assetsRoot,
-      sessionName,
-      taskFolderName,
+    await runTaskSectionWorkflow({
+      courseId,
+      sessionName: String(opts.sessionName),
+      taskLetter: "C",
+      taskFolder: opts.taskFolder ? String(opts.taskFolder) : undefined,
+      pageTitle: opts.pageTitle ? String(opts.pageTitle) : undefined,
       notesText: opts.notes ? String(opts.notes) : undefined,
-      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined
+      notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined,
+      publish: Boolean(opts.publish),
+      assetsRoot: path.resolve(String(opts.assetsRoot)),
+      dryRun: Boolean(opts.dryRun)
     });
-
-    const pageTitle = opts.pageTitle
-      ? String(opts.pageTitle)
-      : assets.pageTitle ?? `${sessionMeta.topic} - Task C`;
-    const taskTitle = pageTitle;
-
-    const mediaAssets: TaskAMediaAsset[] = [...assets.mediaUrls];
-    const uploadedLocalMedia: Array<{ source: string; uploadedUrl: string; id: number }> = [];
-    let uploadedLocalMediaFolderPath: string | undefined;
-
-    if (!opts.dryRun && assets.localMedia.length > 0) {
-      if (!sessionMeta.sessionNumberPadded) {
-        throw new Error(
-          `Cannot map session name "${sessionName}" to a Session_NN/task_c files folder for media upload.`
-        );
-      }
-      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "task_c");
-      uploadedLocalMediaFolderPath = sessionFolderPath;
-      for (const local of assets.localMedia) {
-        const fileData = Buffer.from(await fs.readFile(local.absolutePath));
-        const uploaded = await uploadFileToCanvasSessionFolder({
-          courseId,
-          sessionFolderPath,
-          fileName: local.fileName,
-          contentType: local.contentType,
-          data: fileData
-        });
-        mediaAssets.push({
-          url: uploaded.url,
-          kind: local.kind,
-          label: local.relativePath
-        });
-        uploadedLocalMedia.push({
-          source: local.relativePath,
-          uploadedUrl: uploaded.url,
-          id: uploaded.id
-        });
-      }
-    } else {
-      for (const local of assets.localMedia) {
-        mediaAssets.push({
-          url: local.relativePath,
-          kind: local.kind,
-          label: local.relativePath
-        });
-      }
-    }
-
-    const notesBody = normalizeTaskBlockText(assets.authoredBodyText ?? assets.notesText);
-    if (!notesBody) {
-      throw new Error("Task C notes.md is empty. Add student-facing content and processor tags, then retry.");
-    }
-    const mediaLookup = buildTaskAMediaLookup(mediaAssets);
-    const finalTaskBodyMarkdown = buildTaskMarkdownFromNotes({
-      notesBody,
-      mediaLookup,
-      iframeTemplate: assets.iframeTemplate,
-      youtubeEmbedWidth: assets.youtubeEmbedWidth
-    });
-    const finalCalloutStyles = mergeTaskACalloutStyles(assets.calloutStyles);
-
-    const client = new CanvasClient();
-    const built = await buildTaskCSection(client, courseId, sessionName, {
-      pageTitle,
-      taskTitle,
-      bodyMarkdown: finalTaskBodyMarkdown,
-      suppressTaskTitleHeading: true,
-      disableAutoMediaSection: true,
-      calloutStyles: finalCalloutStyles,
-      mediaAssets
-    });
-
-    console.log(`Course: ${courseId}`);
-    console.log(`Session module: ${built.module.name} (${built.module.id})`);
-    console.log(`Task C header: ${built.taskHeaderTitle}`);
-    console.log(`Task folder: ${taskFolderName}`);
-    console.log(`Assets folder: ${assets.folderPath}`);
-    console.log(`Page title: ${pageTitle}`);
-    console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
-    if (assets.createdFiles.length > 0) {
-      console.log("Created local asset templates:");
-      for (const createdPath of assets.createdFiles) {
-        console.log(`- ${createdPath}`);
-      }
-    }
-    console.log("Task body source: notes.md markdown/legacy compatible mode");
-    console.log(`Callout style presets: ${finalCalloutStyles ? Object.keys(finalCalloutStyles).length : 0}`);
-    console.log(`IFrame template source: ${assets.iframeTemplate ? "[AGENT] notes block" : "default template"}`);
-    console.log(`Media URLs: ${assets.mediaUrls.length}`);
-    console.log(`Local media files: ${assets.localMedia.length}`);
-    console.log(`Media references resolved: ${mediaLookup.size}`);
-    console.log(`Target module position: ${built.insertionPosition}`);
-
-    if (opts.dryRun) {
-      if (assets.localMedia.length > 0) {
-        console.log("Dry run: local media files are not uploaded.");
-      }
-      console.log("Dry run: no Canvas updates performed.");
-      console.log("Generated HTML preview:");
-      console.log(built.sectionHtml.split("\n").slice(0, 60).join("\n"));
-      return;
-    }
-
-    if (uploadedLocalMedia.length > 0) {
-      const sessionFolderPath = uploadedLocalMediaFolderPath ?? "Session_[unknown]/task_c";
-      console.log(`Uploaded ${uploadedLocalMedia.length} local media file(s) to Canvas files (${sessionFolderPath}):`);
-      for (const uploaded of uploadedLocalMedia) {
-        console.log(`- ${uploaded.source} -> ${uploaded.uploadedUrl} (${uploaded.id})`);
-      }
-    }
-
-    const normalize = (v: string): string => v.trim().toLowerCase();
-    const existingModulePage = built.moduleItems.find(
-      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
-    );
-
-    let pageUrl: string;
-    let createdPage = false;
-    let createdModuleItem = false;
-    let movedModuleItem = false;
-
-    if (existingModulePage?.page_url) {
-      pageUrl = existingModulePage.page_url;
-      await client.updatePage(courseId, pageUrl, {
-        title: pageTitle,
-        body: built.sectionHtml,
-        published: shouldPublish
-      });
-    } else {
-      const pages = await client.listPages(courseId, pageTitle);
-      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
-      if (existingPage) {
-        pageUrl = existingPage.url;
-        await client.updatePage(courseId, pageUrl, {
-          title: pageTitle,
-          body: built.sectionHtml,
-          published: shouldPublish
-        });
-      } else {
-        const created = await client.createPage(courseId, {
-          title: pageTitle,
-          body: built.sectionHtml,
-          published: shouldPublish
-        });
-        pageUrl = created.url;
-        createdPage = true;
-      }
-    }
-
-    const moduleItemForPage = built.moduleItems.find(
-      (item) => item.type === "Page" && item.page_url === pageUrl
-    );
-    if (!moduleItemForPage) {
-      await client.createModulePageItem(courseId, built.module.id, {
-        title: pageTitle,
-        pageUrl,
-        position: built.insertionPosition
-      });
-      createdModuleItem = true;
-    } else if (moduleItemForPage.position !== built.insertionPosition) {
-      await client.updateModuleItemPosition(
-        courseId,
-        built.module.id,
-        moduleItemForPage.id,
-        built.insertionPosition
-      );
-      movedModuleItem = true;
-    }
-
-    console.log(createdPage ? "Created page." : "Updated existing page.");
-    if (createdModuleItem) console.log("Added page to session module.");
-    if (movedModuleItem) console.log("Moved module item to target section.");
-    if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
-    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
   });
 
 program.command("today-section")
@@ -2813,201 +5233,57 @@ program.command("today-section")
       throw new Error("Use either --image-file or --image-id, not both.");
     }
 
-    const sessionName = String(opts.sessionName);
-    const sessionMeta = parseSessionMetadata(sessionName);
-    const pageTitle = opts.pageTitle
-      ? String(opts.pageTitle)
-      : buildIntroductionPageTitle(sessionName);
-    const shouldPublish = Boolean(opts.publish);
-    const assetsRoot = path.resolve(String(opts.assetsRoot));
-    const imageId = opts.imageId ? parsePositiveInteger(String(opts.imageId), "--image-id") : undefined;
-    const client = new CanvasClient();
-
-    const assets = await prepareTodaySectionAssets({
-      assetsRoot,
-      sessionName,
-      sectionTitle: TODAY_SECTION_ASSET_TITLE,
+    await runTodaySectionWorkflow({
+      courseId,
+      sessionName: String(opts.sessionName),
+      pageTitle: opts.pageTitle ? String(opts.pageTitle) : undefined,
       notesText: opts.notes ? String(opts.notes) : undefined,
       notesFilePath: opts.notesFile ? String(opts.notesFile) : undefined,
       imageUrl: opts.imageUrl ? String(opts.imageUrl) : undefined,
-      imageId,
+      imageId: opts.imageId ? parsePositiveInteger(String(opts.imageId), "--image-id") : undefined,
       imageFilePath: opts.imageFile ? String(opts.imageFile) : undefined,
       aiImagePrompt: opts.aiImagePrompt ? String(opts.aiImagePrompt) : undefined,
-      client
+      publish: Boolean(opts.publish),
+      assetsRoot: path.resolve(String(opts.assetsRoot)),
+      dryRun: Boolean(opts.dryRun)
     });
-    const seedBuilt = await buildWhatAreWeDoingTodaySection(client, courseId, sessionName, {
-      sectionTitle: pageTitle,
-      notesText: undefined,
-      imageUrl: assets.imageUrl,
-      aiImagePrompt: assets.aiImagePrompt
+  });
+
+program.command("course-orchestrate")
+  .description("Create or update multiple course modules and pages from a JSON blueprint.")
+  .requiredOption("--course-id <id>", "Canvas course id to target")
+  .requiredOption(
+    "--from-file <path>",
+    "Path to the course orchestration JSON blueprint, typically under apps/cli/course-assets/<course>/orchestrator.json"
+  )
+  .option(
+    "--assets-root <path>",
+    "Optional local root for section assets used by session workflows. If omitted, course-orchestrate uses apps/cli/session-assets/<course-name>."
+  )
+  .option("--prepare-assets", "Create/check local session asset files without Canvas writes", false)
+  .option("--publish", "Publish supported content when a step does not set publish explicitly", false)
+  .option("--dry-run", "Plan orchestration without making Canvas writes", false)
+  .action(async (opts) => {
+    const courseId = Number(opts.courseId);
+    if (!Number.isFinite(courseId) || courseId <= 0) {
+      throw new Error("Invalid --course-id. Provide a positive numeric Canvas course id.");
+    }
+    if (opts.prepareAssets && opts.dryRun) {
+      throw new Error("Use either --prepare-assets or --dry-run, not both.");
+    }
+    const blueprintFilePath = String(opts.fromFile);
+    const assetsRoot = opts.assetsRoot
+      ? path.resolve(String(opts.assetsRoot))
+      : deriveCourseScopedSessionAssetsRoot(blueprintFilePath);
+
+    await runCourseOrchestrateWorkflow({
+      courseId,
+      blueprintFilePath,
+      assetsRoot,
+      publish: Boolean(opts.publish),
+      prepareAssets: Boolean(opts.prepareAssets),
+      dryRun: Boolean(opts.dryRun)
     });
-
-    const modulePageTitles = seedBuilt.moduleItems
-      .filter((item) => item.type === "Page")
-      .map((item) => item.title);
-    const taskLabels = extractTaskLabels(seedBuilt.moduleItems);
-    const fallbackSummaryParagraphs = extractParagraphsFromHtml(seedBuilt.sectionHtml, 2);
-
-    const generatedIntro = await generateTodayIntroFromAgent({
-      sessionName,
-      sessionTopic: sessionMeta.topic,
-      notesText: assets.notesText,
-      taskLabels,
-      modulePageTitles,
-      fallbackSummaryParagraphs,
-      paragraphCount: 2
-    });
-    const agentNotesText = generatedIntro.paragraphs.join("\n\n");
-    const finalAiImagePrompt = assets.aiImagePrompt ?? generatedIntro.imagePrompt;
-
-    let built = await buildWhatAreWeDoingTodaySection(client, courseId, sessionName, {
-      sectionTitle: pageTitle,
-      notesText: agentNotesText,
-      imageUrl: assets.imageUrl,
-      aiImagePrompt: finalAiImagePrompt
-    });
-
-    console.log(`Course: ${courseId}`);
-    console.log(`Session module: ${built.module.name} (${built.module.id})`);
-    console.log(`Page title: ${pageTitle}`);
-    console.log(`Publish mode: ${shouldPublish ? "published" : "unpublished (default)"}`);
-    console.log(`Section folder key: ${TODAY_SECTION_ASSET_TITLE}`);
-    console.log(`Assets folder: ${assets.folderPath}`);
-    if (assets.createdFiles.length > 0) {
-      console.log("Created local asset templates:");
-      for (const createdPath of assets.createdFiles) {
-        console.log(`- ${createdPath}`);
-      }
-    }
-    console.log(`Source pages scanned: ${built.sourcePageCount}`);
-    console.log(`Intro pages used: ${built.introPageCount}`);
-    console.log("Summary source: agent-generated from notes + module context");
-    if (assets.imageSource === "local-file") {
-      const before = assets.localImageOriginalBytes ? formatByteSize(assets.localImageOriginalBytes) : undefined;
-      const after = assets.localImageOutputBytes ? formatByteSize(assets.localImageOutputBytes) : undefined;
-      const optimizedTag = assets.localImageOptimized ? " [optimized]" : "";
-      console.log(
-        `Image mode: local file override (${assets.localImagePath})${optimizedTag}` +
-        `${before && after ? ` (${before} -> ${after})` : ""}` +
-        `${assets.localImageOutputMimeType ? ` [${assets.localImageOutputMimeType}]` : ""}`
-      );
-    } else if (assets.imageSource === "canvas-file-id") {
-      console.log(
-        `Image mode: Canvas file id ${assets.canvasImageId}` +
-        `${assets.canvasImageDisplayName ? ` (${assets.canvasImageDisplayName})` : ""}`
-      );
-    } else if (assets.imageSource === "cli-url") {
-      console.log("Image mode: --image-url input");
-    } else if (assets.imageSource === "file-url") {
-      console.log("Image mode: image-url.txt");
-    } else if (built.imageUrl) {
-      console.log("Image mode: auto-detected from existing module intro content");
-    } else {
-      console.log("Image mode: placeholder");
-    }
-    if (finalAiImagePrompt) {
-      console.log(`AI image brief: ${finalAiImagePrompt}`);
-    }
-    console.log(`Target module position: ${built.insertionPosition}`);
-
-    if (opts.dryRun) {
-      console.log("Dry run: no Canvas updates performed.");
-      console.log("Generated HTML preview:");
-      console.log(sanitizeTodaySectionPreviewHtml(built.sectionHtml).split("\n").slice(0, 40).join("\n"));
-      return;
-    }
-
-    if (assets.imageSource === "local-file" && assets.localImageOutputBuffer && assets.localImageOutputMimeType) {
-      if (!sessionMeta.sessionNumberPadded) {
-        throw new Error(
-          `Cannot map session name "${sessionName}" to a Session_NN/what_are_we_doing_today files folder for image upload.`
-        );
-      }
-      const sessionFolderPath = buildCanvasSectionFilesFolderPath(sessionMeta, "what_are_we_doing_today");
-      const uploadName =
-        assets.localImageOutputFileName ??
-        `intro-${sessionMeta.sessionNumberPadded}${extensionForMimeType(assets.localImageOutputMimeType)}`;
-      const uploaded = await uploadImageToCanvasSessionFolder({
-        courseId,
-        sessionFolderPath,
-        fileName: uploadName,
-        contentType: assets.localImageOutputMimeType,
-        data: assets.localImageOutputBuffer
-      });
-      console.log(
-        `Uploaded image to Canvas files (${sessionFolderPath}): ${uploaded.display_name ?? uploadName} (${uploaded.id})`
-      );
-      built = await buildWhatAreWeDoingTodaySection(client, courseId, sessionName, {
-        sectionTitle: pageTitle,
-        notesText: agentNotesText,
-        imageUrl: uploaded.url,
-        aiImagePrompt: finalAiImagePrompt
-      });
-    }
-
-    const normalize = (v: string): string => v.trim().toLowerCase();
-    const existingModulePage = built.moduleItems.find(
-      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
-    );
-
-    let pageUrl: string;
-    let createdPage = false;
-    let createdModuleItem = false;
-    let movedModuleItem = false;
-
-    if (existingModulePage?.page_url) {
-      pageUrl = existingModulePage.page_url;
-      await client.updatePage(courseId, pageUrl, {
-        title: pageTitle,
-        body: built.sectionHtml,
-        published: shouldPublish
-      });
-    } else {
-      const pages = await client.listPages(courseId, pageTitle);
-      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
-      if (existingPage) {
-        pageUrl = existingPage.url;
-        await client.updatePage(courseId, pageUrl, {
-          title: pageTitle,
-          body: built.sectionHtml,
-          published: shouldPublish
-        });
-      } else {
-        const created = await client.createPage(courseId, {
-          title: pageTitle,
-          body: built.sectionHtml,
-          published: shouldPublish
-        });
-        pageUrl = created.url;
-        createdPage = true;
-      }
-    }
-
-    const moduleItemForPage = built.moduleItems.find(
-      (item) => item.type === "Page" && item.page_url === pageUrl
-    );
-    if (!moduleItemForPage) {
-      await client.createModulePageItem(courseId, built.module.id, {
-        title: pageTitle,
-        pageUrl,
-        position: built.insertionPosition
-      });
-      createdModuleItem = true;
-    } else if (moduleItemForPage.position !== built.insertionPosition) {
-      await client.updateModuleItemPosition(
-        courseId,
-        built.module.id,
-        moduleItemForPage.id,
-        built.insertionPosition
-      );
-      movedModuleItem = true;
-    }
-
-    console.log(createdPage ? "Created page." : "Updated existing page.");
-    if (createdModuleItem) console.log("Added page to session module.");
-    if (movedModuleItem) console.log("Moved module item to target section.");
-    if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
-    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
   });
 
 program.parseAsync(process.argv).catch((err) => {

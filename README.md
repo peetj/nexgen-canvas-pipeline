@@ -28,14 +28,16 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 ## Command Summary
 ### Main CLI (`apps/cli/src/cli.ts`)
 - `create`: Creates a Canvas Classic Quiz either from a Nexgen JSON file or generated agent content. It validates the quiz structure and uploads questions to the selected course.
+- `create-survey`: Creates a Canvas survey from a survey JSON file, with support for multiple choice, short answer, essay, and file upload questions.
 - `course-files-scaffold`: Creates a Canvas Files folder scaffold in a course. It supports a built-in default session structure or a custom JSON tree.
-- `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number.
+- `session-headers`: Adds standard Nexgen session subheaders to an existing Canvas module. This is used to scaffold a consistent module structure for a specific session number and ensure the matching Canvas Files session folders exist.
 - `clone-survey`: Copies an existing quiz/survey into session-numbered variants. It can generate multiple target titles from a template and duplicate all questions from the source quiz.
 - `teacher-notes`: Builds a canonical Teacher Notes page from existing session content. In live mode it updates module placement; in draft mode it prepares a safe draft page without changing live placement.
 - `task-a-section`: Builds/updates a Task A page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task A` header and uploading local media to Canvas Files under `Session_NN/task_a`.
 - `task-b-section`: Builds/updates a Task B page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task B` header and uploading local media to Canvas Files under `Session_NN/task_b`.
 - `task-c-section`: Builds/updates a Task C page from `session-assets/<session>/<task-folder>/notes.md` and local media, placing it under the `Session NN: Task C` header and uploading local media to Canvas Files under `Session_NN/task_c`.
 - `today-section`: Builds/updates the session introduction page for the `What we are doing Today` section. It rewrites notes via the intro agent, uploads local images to Canvas Files under `Session_NN/what_are_we_doing_today`, then applies final HTML.
+- `course-orchestrate`: Creates or updates multiple modules/pages from a JSON blueprint. It reuses existing section workflows such as `session-headers`, `today-section`, and task section generation instead of re-implementing them, and by default scopes local session assets under `apps/cli/session-assets/<course-name>/`.
 
 ### Plugins Runner (`apps/plugins-runner/src/cli.ts`)
 - `list`: Shows available reusable Canvas workflow plugins that can be executed by the runner.
@@ -80,12 +82,19 @@ Options:
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--from-file <path>`: Path to Nexgen quiz JSON input.
 - `--prompt <text>`: Prompt used to generate quiz content via quiz agent.
+- `--prompt-file <path>`: Prompt file used to generate quiz content via quiz agent.
+- `--title <title>`: Optional quiz title override.
+- `--module-name <name>`: Optional module name to place the quiz into.
+- `--after-header-title <title>`: Optional subheader title to place the quiz after. Requires `--module-name`.
+- `--publish`: Publish quiz after create. Default is unpublished.
+- `--skip-existing`: Reuse an existing quiz with the same target title.
 - `--difficulty <level>`: Optional agent difficulty preference. One of `easy`, `medium`, `hard`, `mixed`.
 - `--dry-run`: Validate/show summary only; no Canvas upload.
 
 Rules:
-- Provide exactly one of `--from-file` or `--prompt`.
-- `--difficulty` only applies with `--prompt`.
+- Provide exactly one of `--from-file`, `--prompt`, or `--prompt-file`.
+- `--difficulty` only applies with `--prompt` or `--prompt-file`.
+- If `--module-name` is provided, the quiz is placed under `QUIZ` by default unless `--after-header-title` is set explicitly.
 - For file-based quizzes, set `settings.shuffleAnswers: true` in the JSON if you want the correct choice position randomized before upload.
 - Agent-generated quizzes now request shuffled answers by default.
 
@@ -95,6 +104,7 @@ npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.exa
 npx tsx apps/cli/src/cli.ts create --from-file apps/cli/examples/nexgen-quiz.example.json
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --course-id 12345 --dry-run
 npx tsx apps/cli/src/cli.ts create --prompt "Year 9 chemistry: acids and bases" --difficulty hard --course-id 12345 --dry-run
+npx tsx apps/cli/src/cli.ts create --prompt-file apps/cli/session-assets/example-course/Session\ 01\ -\ Example\ Build/QUIZ/prompt.md --title "Example Build Quiz" --module-name "Session 01 - Example Build" --skip-existing
 
 # npm wrapper form
 npm run dev -- create --from-file apps/cli/examples/nexgen-quiz.example.json --dry-run
@@ -110,7 +120,7 @@ Options:
 
 Default scaffold:
 - Top level: `Session_00` to `Session_08`, plus `BONUS_Session_09` and `BONUS_Session_10`
-- Second level inside each top-level folder: `teacher_notes`, `what_are_we_doing_today`, `task_a`, `task_b`, `task_c`
+- Second level inside each top-level folder: `teachers_notes`, `what_are_we_doing_today`, `task_a`, `task_b`, `task_c`
 
 JSON format:
 - Either a root array of folders, or an object with a `folders` array.
@@ -155,23 +165,56 @@ Options:
 - `--range <start-end>`: Inclusive session range (for example, `2-7`).
 - `--sessions <numbers>`: Comma-separated sessions (for example, `2,3,5`).
 - `--pad <number>`: Width for `{nn}` padding. Default `2`.
+- `--source-course-id <id>`: Optional source Canvas course id. Defaults to `--course-id`.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--skip-existing`: Skip generated titles that already exist.
 - `--dry-run`: Preview only.
 
 Rules:
 - Provide exactly one of `--range` or `--sessions`.
+- Cross-course clones strip course-scoped fields such as assignment group and availability dates.
 
 Examples:
 ```bash
 # Copy Session-01 survey to Session-02..07
 npx tsx apps/cli/src/cli.ts clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --range 2-7 --dry-run
 
+# Copy from a different source course into the target course
+npx tsx apps/cli/src/cli.ts clone-survey --source-course-id 88 --course-id 21 --source-title "Weekly Check-In" --title-template "Weekly Check-In-Session-{nn}" --sessions 1,2,3,4,5,6,7,8 --skip-existing
+
 # Custom template and explicit sessions
 npx tsx apps/cli/src/cli.ts clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --title-template "Weekly-Check-In-Session-{nn}" --sessions 2,3,4,5,6,7
 
 # npm wrapper form
 npm run dev -- clone-survey --course-id 21 --source-title "Weekly-Check-In-Session-01" --range 2-7
+```
+
+### Command: `create-survey`
+Create a Canvas survey from a `nexgen-survey.v1` JSON file.
+
+Options:
+- `--from-file <path>`: Required. Path to the survey JSON file.
+- `--title <title>`: Optional survey title override.
+- `--module-name <name>`: Optional module name to place the survey into.
+- `--after-header-title <title>`: Optional subheader title to place the survey after. Requires `--module-name`.
+- `--publish`: Publish survey after create. Default is unpublished.
+- `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
+- `--skip-existing`: Reuse an existing survey with the same target title.
+- `--dry-run`: Preview only.
+
+Supported survey question types:
+- `multiple_choice_question`
+- `short_answer_question`
+- `essay_question`
+- `file_upload_question`
+
+Examples:
+```bash
+# Preview survey creation only
+npx tsx apps/cli/src/cli.ts create-survey --course-id 21 --from-file apps/cli/session-assets/example-course/shared/weekly-check-in.survey.json --title "Weekly Check-In-Session 01" --dry-run
+
+# Create and place the survey under the Weekly Check-In header in a module
+npx tsx apps/cli/src/cli.ts create-survey --course-id 21 --from-file apps/cli/session-assets/example-course/shared/weekly-check-in.survey.json --title "Weekly Check-In-Session 01" --module-name "Session 01 - Example Build" --after-header-title "Weekly Check-In" --skip-existing
 ```
 
 ### Command: `teacher-notes`
@@ -230,6 +273,7 @@ Options:
 Task A asset skeleton (auto-created if missing):
 - `notes.md` only (single source of truth)
 - `images/` folder (for local image/video assets)
+- New scaffolded `notes.md` files include starter sections for learning goals, materials, steps, a checklist, local image and video examples, a table example, callouts, a helpful link, and an optional `[AGENT]` block.
 
 `notes.md` authoring:
 - Preferred format is Markdown-first with `pageTitle` in frontmatter.
@@ -273,7 +317,7 @@ Generate/update the `Task B` page from local session assets.
 
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
-- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `TaskB`.
+- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `Task B`.
 - `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` `pageTitle` frontmatter value.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
@@ -284,6 +328,7 @@ Options:
 
 Behavior notes:
 - Same Markdown-first / legacy-compatible authoring path as `task-a-section`.
+- The default scaffold includes the same richer starter `notes.md` template used by Task A.
 - Local media uploads target `Session_NN/task_b`.
 
 Example:
@@ -296,7 +341,7 @@ Generate/update the `Task C` page from local session assets.
 
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
-- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `TaskC`.
+- `--task-folder <name>`: Optional folder name under `session-assets/<session-name>/`. If omitted, CLI auto-detects or defaults to `Task C`.
 - `--page-title <title>`: Optional Canvas page title override. Default: `notes.md` `pageTitle` frontmatter value.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
 - `--notes <text>`: Optional notes markdown override (saved to `notes.md`).
@@ -307,6 +352,7 @@ Options:
 
 Behavior notes:
 - Same Markdown-first / legacy-compatible authoring path as `task-a-section`.
+- The default scaffold includes the same richer starter `notes.md` template used by Task A.
 - Local media uploads target `Session_NN/task_c`.
 
 Example:
@@ -334,20 +380,25 @@ Options:
 Notes:
 - The command creates local template files under:
   `apps/cli/session-assets/<session-name>/What we are doing Today/`
+  or, when `course-orchestrate` derives a course-scoped root,
+  `apps/cli/session-assets/<course-name>/<session-name>/What we are doing Today/`
 - Created templates:
   - `notes.md`
-  - `image-url.txt`
-  - `ai-image-prompt.txt`
+  - `images/`
 - If you override `--assets-root`, `--image-file` stays relative to that resolved session section folder.
 - `--image-id` uses an already-uploaded Canvas file directly and skips local image discovery/upload for that run.
 - `--image-url`, `--image-id`, and `--image-file` are mutually exclusive CLI inputs.
 - `--image-file` selects a specific local image from that folder and disables the default auto-pick behavior.
 - `--image-file` must stay inside that folder; absolute paths and escape paths are rejected.
 - You can also place a local image file directly in that same folder (`image.png`, `image.jpg`, etc.).
-- If `--image-id` is not used, the selected local image file takes priority over `--image-url` and `image-url.txt`.
+- If `--image-id` is not used, the selected local image file takes priority over `--image-url` and `notes.md` `imageUrl`.
 - Oversized local image files are auto-optimized (resize/compress) to keep web payloads controlled (target <= `450 KB`).
 - On publish, local image files are uploaded to Canvas Files in `Session_NN/what_are_we_doing_today` first, then the page HTML is updated to use that uploaded file URL.
 - Intro text is generated by the intro endpoint (`/today-intro`), not copied verbatim from notes.
+- `notes.md` is the single source of truth and can include frontmatter keys `imageFile`, `imageUrl`, and `aiImagePrompt`.
+- `imageFile` should be a relative path inside that same folder, for example `images/intro.jpg`.
+- If `imageFile` is present and the file exists, it is used. If it does not exist, the section falls back to `imageUrl` or the placeholder image.
+- `aiImagePrompt` stores the brief only. It does not generate an image by itself yet.
 - Ensure the deployed canvas agent supports `POST /today-intro`.
 
 Examples:
@@ -372,6 +423,91 @@ npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session
 
 # Publish live (otherwise defaults to unpublished)
 npx tsx apps/cli/src/cli.ts today-section --course-id 21 --session-name "Session 05 - Soldering" --publish
+```
+
+### Command: `course-orchestrate`
+Create or update multiple modules and pages from a JSON blueprint for an existing Canvas course.
+
+Options:
+- `--course-id <id>`: Required. Existing Canvas course id to target.
+- `--from-file <path>`: Required. Path to the orchestration JSON blueprint.
+- `--assets-root <path>`: Optional local root for section assets used by `today-section` and task section steps. If omitted, the default is `apps/cli/session-assets/<course-name>` derived from the blueprint folder name.
+- `--prepare-assets`: Create/check local session asset files from the blueprint without Canvas writes.
+- `--publish`: Publish supported content when a step does not set `publish` explicitly.
+- `--dry-run`: Plan orchestration without Canvas writes.
+
+Blueprint notes:
+- Supported schema versions: `course-orchestrator.v1` and `course-orchestrator.v2`.
+- `v1` uses the explicit shape `{ "schemaVersion": "course-orchestrator.v1", "modules": [...] }`.
+- `v2` adds the template shape `{ "schemaVersion": "course-orchestrator.v2", "moduleTemplate": {...}, "sessions": [...] }`.
+- `v2` is the recommended authoring format when you want to generate multiple session modules from one shared structure.
+- Placeholders supported in `v2` string fields include `{n}`, `{nn}`, `{topic}`, and custom values from `sessions[].variables`.
+- Each module entry can create the module if missing, then run ordered workflow steps.
+- Supported step types: `session-headers`, `today-section`, `task-a-section`, `task-b-section`, `task-c-section`, `create-quiz`, `clone-survey`, `create-survey`, `subheader`, `page`.
+- `page` steps use a typed `content` array. Supported content block types: `markdown`, `markdownFile`, `html`, `htmlFile`, `imageFile`.
+- `today-section` and task section steps reuse the same logic as the standalone commands.
+- `create-quiz` reuses the standalone quiz creation workflow and can generate a quiz from the cloud agent using a session-local prompt file under `QUIZ/prompt.md`.
+- `--prepare-assets` is the recommended first pass for session-backed workflows. It materializes local `session-assets` folders and validates file-backed survey/page inputs before any live Canvas run.
+- `clone-survey` reuses the survey clone workflow and can clone from another course into the target course, then place the survey under a module subheader such as `Weekly Check-In`.
+- `clone-survey` step fields: `sourceTitle`, `title`, optional `sourceCourseId`, optional `afterHeaderTitle`, optional `skipExisting`.
+- `create-quiz` step fields: optional `title`, optional `fromFile`, optional `prompt`, optional `promptFile`, optional `difficulty`, optional `afterHeaderTitle`, optional `skipExisting`, optional `publish`.
+- `create-survey` creates a survey from a JSON file and can place it under a module subheader such as `Weekly Check-In`.
+- `create-survey` step fields: `fromFile`, optional `title`, optional `afterHeaderTitle`, optional `skipExisting`, optional `publish`.
+- Recommended repo layout:
+  `apps/cli/course-assets/<course-name>/orchestrator.json`
+  with authored content under `apps/cli/session-assets/<course-name>/...`.
+- `page.content[].path`, `today-section.notesFile`, task `notesFile`, and `create-survey.fromFile` resolve relative to `apps/cli/session-assets/<course-name>/` first, then fall back to the blueprint file for backward compatibility.
+- Prefer keeping `today-section` content in `apps/cli/session-assets/<course-name>/<session-name>/What we are doing Today/notes.md` and omit `today-section.notesFile` unless you explicitly want an override source.
+- `course-orchestrate` stores session-backed local assets under `apps/cli/session-assets/<course-name>/...` by default so sessions from different courses do not mix.
+- On a brand-new module, `--dry-run` can fully plan structural steps immediately. Module-aware content previews such as `today-section` may be skipped until the module exists or a live run creates it.
+- Example blueprint: `apps/cli/course-assets/example-course/orchestrator.json`
+
+Examples:
+```bash
+# Create/check local session asset folders and files before a live run
+npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/course-assets/example-course/orchestrator.json --prepare-assets
+
+# Plan a multi-module orchestration run
+npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/course-assets/example-course/orchestrator.json --dry-run
+
+# Apply the blueprint to the target course
+npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/cli/course-assets/example-course/orchestrator.json
+```
+
+`clone-survey` step example:
+
+```json
+{
+  "type": "clone-survey",
+  "sourceCourseId": 88,
+  "sourceTitle": "Weekly Check-In",
+  "title": "Weekly Check-In-Session {nn}",
+  "afterHeaderTitle": "Weekly Check-In",
+  "skipExisting": true
+}
+```
+
+`create-survey` step example:
+
+```json
+{
+  "type": "create-survey",
+  "fromFile": "shared/weekly-check-in.survey.json",
+  "title": "Weekly Check-In-Session {nn}",
+  "afterHeaderTitle": "Weekly Check-In",
+  "skipExisting": true
+}
+```
+
+`create-quiz` step example:
+
+```json
+{
+  "type": "create-quiz",
+  "title": "{topic} Quiz",
+  "difficulty": "mixed",
+  "skipExisting": true
+}
 ```
 
 ### Plugins Runner

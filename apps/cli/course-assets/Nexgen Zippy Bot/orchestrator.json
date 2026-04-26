@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "course-orchestrator.v2",
+  "moduleTemplate": {
+    "name": "Session {nn} - {topic}",
+    "steps": [
+      { "type": "session-headers" },
+      {
+        "type": "today-section",
+        "pageTitle": "Introduction: {topic}"
+      },
+      {
+        "type": "create-quiz",
+        "title": "{topic} Quiz",
+        "difficulty": "mixed",
+        "skipExisting": true
+      },
+      {
+        "type": "task-a-section"
+      },
+      {
+        "type": "task-b-section"
+      },
+      {
+        "type": "task-c-section"
+      },
+      {
+        "type": "create-survey",
+        "fromFile": "shared/weekly-check-in.survey.json",
+        "title": "Weekly Check-In-Session {nn}",
+        "afterHeaderTitle": "Weekly Check-In",
+        "skipExisting": true
+      }
+    ]
+  },
+  "sessions": [
+    { "sessionNumber": 1, "topic": "Nexgen Zippy Demo" },
+    { "sessionNumber": 2, "topic": "Customizing Zippy in 3D" },
+    { "sessionNumber": 3, "topic": "Understanding Zippy's Components" },
+    { "sessionNumber": 4, "topic": "Prototyping Zippy's Circuit" },
+    { "sessionNumber": 5, "topic": "Soldering Zippy" },
+    { "sessionNumber": 6, "topic": "Assembling Zippy" },
+    { "sessionNumber": 7, "topic": "Wiring, Coding + Testing Zippy" },
+    { "sessionNumber": 8, "topic": "Zippy Exploration" }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "course-orchestrator.v2",
+  "moduleTemplate": {
+    "name": "Session {nn} - {topic}",
+    "steps": [
+      { "type": "session-headers" },
+      {
+        "type": "today-section",
+        "pageTitle": "Introduction: {topic}",
+        "imageUrl": "https://example.com/session-{nn}.jpg"
+      },
+      {
+        "type": "create-quiz",
+        "title": "{topic} Quiz",
+        "difficulty": "mixed",
+        "skipExisting": true
+      },
+      {
+        "type": "create-survey",
+        "fromFile": "shared/weekly-check-in.survey.json",
+        "title": "Weekly Check-In-Session {nn}",
+        "afterHeaderTitle": "Weekly Check-In",
+        "skipExisting": true
+      },
+      {
+        "type": "subheader",
+        "title": "Feedback"
+      },
+      {
+        "type": "page",
+        "title": "Session {nn} Feedback",
+        "afterHeaderTitle": "Feedback",
+        "content": [
+          {
+            "type": "markdownFile",
+            "path": "pages/session-{nn}-feedback.md"
+          }
+        ]
+      }
+    ]
+  },
+  "sessions": [
+    {
+      "sessionNumber": 1,
+      "topic": "Example Build"
+    },
+    {
+      "sessionNumber": 2,
+      "topic": "Prototype Review"
+    }
+  ]
+}

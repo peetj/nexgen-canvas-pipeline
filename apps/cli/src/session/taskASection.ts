@@ -50,6 +50,30 @@ const CALLOUT_LINE_RE = /^\s*(NOTE|INFO|WARNING|SUCCESS|QUESTION)\s*:\s*(.+)\s*$
 const DEFAULT_PHILOSOPHY_TEXT =
   "Task A is the foundation task: students build core understanding with clear, achievable steps before attempting extension complexity.";
 
+const BASE_CALLOUT_INLINE_STYLE = [
+  "border-left:4px solid #016CE3",
+  "background:#F5F6FF",
+  "border-radius:0",
+  "line-height:1.55",
+  "overflow:hidden",
+  "padding:15px",
+  "margin:12px 0"
+].join("; ");
+
+const CALLOUT_TONE_INLINE_STYLE: Record<TaskACalloutTone, string> = {
+  info: "",
+  note: "border-left-color:#f4c60e; background:#fffbea",
+  warning: "border-left-color:#FE2B3E; background:#fff7f5",
+  success: "border-left-color:#5FD26F; background:#f6fdf9",
+  question: "border-left-color:#d35400; background:#FFE5B4"
+};
+
+const CALLOUT_TITLE_INLINE_STYLE = [
+  "margin:0 0 8px",
+  "font-size:1rem",
+  "color:#0f1721"
+].join("; ");
+
 const BASE_TASK_A_CSS = `
 .ng-task-page {
   max-width: 980px;
@@ -242,7 +266,9 @@ function renderTaskASectionHtml(input: TaskASectionBuildOptions): string {
   }
 
   if (!explicitBodyMarkdown) {
-    lines.push(`<section class="ng-task-philosophy ng-task-callout ng-task-callout--info">`);
+    lines.push(
+      `<section class="ng-task-philosophy ng-task-callout ng-task-callout--info" style="${escapeHtml(buildCalloutInlineStyle("info", calloutStyles))}">`
+    );
     lines.push("<h3>Task A Philosophy</h3>");
     lines.push(philosophyHtml);
     lines.push("</section>");
@@ -280,7 +306,9 @@ function renderTaskASectionHtml(input: TaskASectionBuildOptions): string {
   lines.push("</section>");
 
   if (!explicitBodyMarkdown && safetyNotes.length > 0) {
-    lines.push('<section class="ng-task-callout ng-task-callout--warning">');
+    lines.push(
+      `<section class="ng-task-callout ng-task-callout--warning" style="${escapeHtml(buildCalloutInlineStyle("warning", calloutStyles))}">`
+    );
     lines.push("<h3>Safety Checks</h3>");
     lines.push("<ul>");
     for (const note of safetyNotes) {
@@ -316,7 +344,7 @@ function renderMarkdownWithCallouts(input: string, calloutStyles: TaskACalloutSt
   for (let i = 0; i < callouts.length; i += 1) {
     const token = `@@NG_CALLOUT_${i}@@`;
     const callout = callouts[i];
-    const rendered = renderCalloutHtml(callout.kind, callout.title, callout.body);
+    const rendered = renderCalloutHtml(callout.kind, callout.title, callout.body, calloutStyles);
     html = html.replace(new RegExp(`<p>\\s*${escapeRegExp(token)}\\s*<\\/p>`, "g"), rendered);
     html = html.replace(token, rendered);
   }
@@ -386,14 +414,15 @@ function tokenizeCalloutMarkdown(
 function renderCalloutHtml(
   kind: string,
   title: string | undefined,
-  body: string
+  body: string,
+  calloutStyles: TaskACalloutStyles
 ): string {
   const normalizedKind = toCalloutKind(kind);
   const bodyHtml = renderMarkdown(body);
 
   return [
-    `<section class="ng-task-callout ng-task-callout--${normalizedKind}">`,
-    title ? `<h4>${escapeHtml(title)}</h4>` : "",
+    `<section class="ng-task-callout ng-task-callout--${normalizedKind}" style="${escapeHtml(buildCalloutInlineStyle(normalizedKind, calloutStyles))}">`,
+    title ? `<h4 style="${escapeHtml(CALLOUT_TITLE_INLINE_STYLE)}">${escapeHtml(title)}</h4>` : "",
     bodyHtml,
     "</section>"
   ]
@@ -444,6 +473,15 @@ function buildCalloutStyleCss(input: TaskACalloutStyles): string {
     lines.push(`${entry.selector} { ${style} }`);
   }
   return lines.join("\n");
+}
+
+function buildCalloutInlineStyle(kind: TaskACalloutTone, input: TaskACalloutStyles): string {
+  const parts = [BASE_CALLOUT_INLINE_STYLE];
+  const toneStyle = CALLOUT_TONE_INLINE_STYLE[kind];
+  if (toneStyle) parts.push(toneStyle);
+  const customStyle = input[kind];
+  if (customStyle) parts.push(customStyle);
+  return parts.join("; ");
 }
 
 function renderMarkdown(input: string): string {
