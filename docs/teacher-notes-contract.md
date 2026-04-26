@@ -11,10 +11,11 @@ This document defines the fixed structure, meaning, and constraints for Nexgen T
 The goal is to make Teacher Notes:
 
 - consistent in structure across sessions
-- genuinely useful to a busy teacher in class
+- genuinely useful to a busy teacher mainly for prepartion for each session
 - grounded in the real session content
 - concise enough to read quickly
 - specific enough to prevent wasted student time
+- should contain any specific gotchas or general topic gotchas relevant to the session
 
 This contract is the human-authored source of truth.
 
@@ -22,7 +23,11 @@ The agent should not invent its own structure.
 The renderer should not infer meaning.
 The CLI should validate output against this contract before publishing.
 
-## Core Principle
+## Core Principles
+
+Teacher Notes should ALWAYS inspire teachers to run a kick-arse club (excuse the French)
+Kick-arse in this context means: Inspiring, Engaging and something you would bring your friends to
+Therefore, teacher notes are not just about ticking boxes, it is about doing something so well that everyone wants to do it.
 
 Teacher Notes are not a lesson summary.
 
@@ -49,6 +54,7 @@ The Teacher Notes page always uses this section order:
 5. Most Common Issues
 
 No extra top-level sections should be added by the agent.
+Each section is an H3 HTML heading.
 
 ## Global Rules
 
@@ -62,6 +68,7 @@ These rules apply to the whole page.
 - Prefer short, high-value lines over padded prose.
 - Use teacher-facing wording everywhere except `Main Session Objective`.
 - Make each line sound session-specific, not reusable boilerplate.
+- Use horizontal rules between each logical section. Use them liberally to space out content.
 
 ### Must Not
 
@@ -104,6 +111,7 @@ This section is student-outcome focused, not teacher-action focused.
 
 #### Format Rules
 
+- No introductory line - should just be a list of bullets
 - 2 to 3 bullet points
 - every bullet starts with `Students will` or `Students can`
 - each bullet is one sentence
@@ -130,7 +138,7 @@ Lists only the software and hardware that matter for successful participation in
 
 - named software used in the session
 - named hardware used in the session
-- `N/A` for hardware when the session is purely digital or conceptual
+- `N/A` for software OR hardware when not required
 
 #### Forbidden Content
 
@@ -143,7 +151,7 @@ Lists only the software and hardware that matter for successful participation in
 - split into `Software` and `Hardware`
 - software: 0 to 6 items
 - hardware: 0 to 10 items
-- if no hardware is genuinely required, use `N/A`
+- if no software OR hardware is genuinely required, use `N/A`
 
 #### Good Example
 
@@ -190,6 +198,7 @@ They are leverage points.
 - Make file naming explicit early so students can find the right Tinkercad version quickly during feedback.
 - Use a quick sketch-and-explain checkpoint before modelling so weak ideas are corrected before students sink time into them.
 - Check whether students are designing around actual chassis space rather than decorating by eye.
+- Keep an eye out for unprintable designs ie. designs with large overhangs
 
 #### Bad Example
 
@@ -214,8 +223,8 @@ Each task section should help the teacher decide:
 
 - Outcome
 - Key points to reinforce
-- Golden nuggets
-- Differentiation
+- Golden nuggets - only use these if they are truly 'golden' ie. one in a million piece of advice that will help immensely
+- Differentiation - only use this if there is a clearly differentiated path between beginners and advanced students.
 
 #### Task Outcome
 
@@ -253,7 +262,7 @@ Good Example:
 
 Meaning:
 
-Small, high-leverage teacher insights that prevent wasted time or reveal a hidden issue.
+Small, high-leverage teacher insights that prevent wasted time or reveal a hidden issue. Should truly be a 'golden' insight that other teachers need to know.
 
 Rules:
 
@@ -414,10 +423,24 @@ This is the intended internal shape, regardless of how the markdown is authored.
 These need your input before the contract is final.
 
 1. Should `Teacher Focus` remain a rendered line, or should it be removed entirely from the canonical page?
+Yes - Teacher focus should be one line after the the bullet list of Main Session Objectives
+eg: Teacher focus: Encourage students to discuss their ideas/thoughts with their peers and explain their thinking instead of just asking for direct fixes.
+
 2. Should `Golden nuggets` always appear for every task, or only when there is something genuinely high-value to say?
+Golden nuggets by definition is scarce. How often do you find gold? Therefore they are 'invaluable' pieces of information that will occur 'some' of the time and refer to high-value info of interest to other teachers.
+
 3. Should `Differentiation` always be rendered, or only when the task naturally supports it?
+Only when the task supports it.
+
 4. Do you want hard length limits per section in the final validation logic?
+NO
+
 5. Do you want different contract variants for different session types, or one global contract with session-specific evidence?
+I think we can have one contract for the 8 session types but we should break out the following and add to it as we go - maybe put a skeleton set in to start with:
+- Skillset Examples
+- Failure Patterns By Domain
+- Strong Teacher Moves By Domain
+- Common Generic Output To Reject
 
 ## Recommendation
 
@@ -429,3 +452,5 @@ Then implement a runtime layer that maps this contract into:
 - prompt instructions
 - renderer expectations
 - test fixtures
+
+YES I AGREE.
