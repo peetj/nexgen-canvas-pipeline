@@ -696,6 +696,24 @@ const LOCAL_IMAGE_WEBP_QUALITIES = [82, 76, 70, 64, 58, 52, 46];
 const QUIZ_SECTION_ASSET_TITLE = "QUIZ";
 const QUIZ_PROMPT_FILE_NAME = "prompt.md";
 const MODULE_ITEM_DEFAULT_INDENT = 1;
+const TEACHER_NOTES_REVIEW_FILE_NAME = "teacher-notes-review.md";
+const TEACHER_NOTES_FOLDER_NAME = "Teacher Notes";
+const TEACHER_NOTES_REVIEW_HTML_PREFIX = "teacher-notes-review-v";
+const TEACHER_NOTES_PUBLISH_READY_FILE_NAME = "teacher-notes-publish-ready.html";
+const TEACHER_NOTES_PUBLISH_READY_MANIFEST_FILE_NAME = "teacher-notes-publish-ready.json";
+const TEACHER_NOTES_TASK_HEADER_RE = /^session\s+\d+\s*:\s*task\s+[a-z0-9]/i;
+
+type TeacherNotesPublishReadyManifest = {
+  courseId: number;
+  courseName: string;
+  sessionName: string;
+  pageTitle: string;
+  sourceMode: "draft" | "review";
+  reviewNotesApplied: boolean;
+  versionNumber: number;
+  sourceHtmlFileName: string;
+  generatedAtUtc: string;
+};
 
 function toFilesystemSegment(input: string): string {
   const cleaned = input
@@ -711,6 +729,16 @@ function deriveCourseScopedSessionAssetsRoot(blueprintFilePath: string): string 
   return path.resolve(process.cwd(), "apps", "cli", "session-assets", courseFolderName);
 }
 
+function deriveCourseScopedSessionAssetsRootFromCourseName(courseName: string): string {
+  return path.resolve(
+    process.cwd(),
+    "apps",
+    "cli",
+    "session-assets",
+    toFilesystemSegment(courseName)
+  );
+}
+
 async function pathExists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
@@ -720,6 +748,232 @@ async function pathExists(filePath: string): Promise<boolean> {
     if (code === "ENOENT") return false;
     throw err;
   }
+}
+
+async function resolveTeacherNotesReviewNotesFilePath(input: {
+  client: CanvasClient;
+  courseId: number;
+  rawPath: string;
+}): Promise<string> {
+  const rawPath = input.rawPath.trim();
+  if (!rawPath) {
+    throw new Error("Review notes file path cannot be empty.");
+  }
+
+  const appendDefaultFileName = (resolvedPath: string): string =>
+    path.extname(resolvedPath).toLowerCase() === ".md"
+      ? resolvedPath
+      : path.resolve(resolvedPath, TEACHER_NOTES_REVIEW_FILE_NAME);
+
+  if (path.isAbsolute(rawPath)) {
+    return appendDefaultFileName(rawPath);
+  }
+
+  const directCandidate = appendDefaultFileName(path.resolve(rawPath));
+  if (await pathExists(directCandidate)) {
+    return directCandidate;
+  }
+
+  const directWithoutAppend = path.resolve(rawPath);
+  if (await pathExists(directWithoutAppend)) {
+    return directWithoutAppend;
+  }
+
+  const course = await input.client.getCourse(input.courseId);
+  const courseAssetsRoot = deriveCourseScopedSessionAssetsRootFromCourseName(course.name);
+  return appendDefaultFileName(path.resolve(courseAssetsRoot, rawPath));
+}
+
+async function resolveTeacherNotesAssetsFolder(input: {
+  client: CanvasClient;
+  courseId: number;
+  sessionName: string;
+}): Promise<{ folderPath: string; courseName: string }> {
+  const course = await input.client.getCourse(input.courseId);
+  return {
+    courseName: course.name,
+    folderPath: path.resolve(
+      deriveCourseScopedSessionAssetsRootFromCourseName(course.name),
+      toFilesystemSegment(input.sessionName),
+      TEACHER_NOTES_FOLDER_NAME
+    )
+  };
+}
+
+function parseTeacherNotesReviewVersion(fileName: string): number | undefined {
+  const match = fileName.match(/^teacher-notes-review-v(\d+)\.html$/i);
+  if (!match) return undefined;
+  const versionNumber = Number(match[1]);
+  return Number.isInteger(versionNumber) && versionNumber > 0 ? versionNumber : undefined;
+}
+
+async function writeTeacherNotesReviewArtifacts(input: {
+  client: CanvasClient;
+  courseId: number;
+  sessionName: string;
+  pageTitle: string;
+  notesHtml: string;
+  taskTitles: string[];
+  sourceMode: "draft" | "review";
+  reviewNotesApplied: boolean;
+}): Promise<{
+  folderPath: string;
+  versionNumber: number;
+  versionPath: string;
+  publishReadyPath: string;
+  manifestPath: string;
+  reviewTemplatePath: string;
+  createdReviewTemplate: boolean;
+}> {
+  const { folderPath, courseName } = await resolveTeacherNotesAssetsFolder({
+    client: input.client,
+    courseId: input.courseId,
+    sessionName: input.sessionName
+  });
+  await fs.mkdir(folderPath, { recursive: true });
+
+  const entries = await fs.readdir(folderPath, { withFileTypes: true });
+  const existingVersions = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => parseTeacherNotesReviewVersion(entry.name))
+    .filter((value): value is number => value !== undefined);
+  const versionNumber = existingVersions.length > 0 ? Math.max(...existingVersions) + 1 : 1;
+  const versionFileName = `${TEACHER_NOTES_REVIEW_HTML_PREFIX}${versionNumber}.html`;
+  const versionPath = path.resolve(folderPath, versionFileName);
+  const publishReadyPath = path.resolve(folderPath, TEACHER_NOTES_PUBLISH_READY_FILE_NAME);
+  const manifestPath = path.resolve(folderPath, TEACHER_NOTES_PUBLISH_READY_MANIFEST_FILE_NAME);
+  const reviewTemplatePath = path.resolve(folderPath, TEACHER_NOTES_REVIEW_FILE_NAME);
+
+  await fs.writeFile(versionPath, input.notesHtml, "utf8");
+  await fs.writeFile(publishReadyPath, input.notesHtml, "utf8");
+  const createdReviewTemplate = await ensureFileWithTemplate(
+    reviewTemplatePath,
+    `${buildTeacherNotesReviewTemplate({
+      sessionName: input.sessionName,
+      pageTitle: input.pageTitle,
+      taskTitles: input.taskTitles
+    })}\n`
+  );
+
+  const manifest: TeacherNotesPublishReadyManifest = {
+    courseId: input.courseId,
+    courseName,
+    sessionName: input.sessionName,
+    pageTitle: input.pageTitle,
+    sourceMode: input.sourceMode,
+    reviewNotesApplied: input.reviewNotesApplied,
+    versionNumber,
+    sourceHtmlFileName: versionFileName,
+    generatedAtUtc: new Date().toISOString()
+  };
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  return {
+    folderPath,
+    versionNumber,
+    versionPath,
+    publishReadyPath,
+    manifestPath,
+    reviewTemplatePath,
+    createdReviewTemplate
+  };
+}
+
+async function readTeacherNotesPublishReadyArtifact(input: {
+  client: CanvasClient;
+  courseId: number;
+  sessionName: string;
+}): Promise<{
+  folderPath: string;
+  publishReadyPath: string;
+  notesHtml: string;
+  manifest?: TeacherNotesPublishReadyManifest;
+}> {
+  const { folderPath } = await resolveTeacherNotesAssetsFolder(input);
+  const publishReadyPath = path.resolve(folderPath, TEACHER_NOTES_PUBLISH_READY_FILE_NAME);
+  const notesHtml = await fs.readFile(publishReadyPath, "utf8");
+  const manifestPath = path.resolve(folderPath, TEACHER_NOTES_PUBLISH_READY_MANIFEST_FILE_NAME);
+  const manifestText = await readTextIfExists(manifestPath);
+  let manifest: TeacherNotesPublishReadyManifest | undefined;
+  if (manifestText) {
+    manifest = JSON.parse(manifestText) as TeacherNotesPublishReadyManifest;
+  }
+  return {
+    folderPath,
+    publishReadyPath,
+    notesHtml,
+    manifest
+  };
+}
+
+function findTeacherNotesInsertionPosition(items: CanvasModuleItem[]): number {
+  const sorted = [...items].sort((a, b) => a.position - b.position);
+  const teacherHeader = sorted.find(
+    (item) =>
+      item.type === "SubHeader" &&
+      (normalizeName(item.title) === "teachers notes" || normalizeName(item.title) === "teacher notes")
+  );
+  if (teacherHeader) return teacherHeader.position + 1;
+  return sorted.length === 0 ? 1 : sorted[0].position;
+}
+
+function collectTeacherNotesTaskTitles(moduleItems: CanvasModuleItem[]): string[] {
+  return moduleItems
+    .filter((item) => item.type === "SubHeader" && TEACHER_NOTES_TASK_HEADER_RE.test(item.title))
+    .map((item) => item.title.trim());
+}
+
+function buildTeacherNotesReviewTemplate(input: {
+  sessionName: string;
+  pageTitle: string;
+  taskTitles: string[];
+}): string {
+  const lines: string[] = [
+    "# Teacher Notes Review",
+    "",
+    `Session: ${input.sessionName}`,
+    `Page Title: ${input.pageTitle}`,
+    "",
+    "<!-- Review the current draft page in Canvas and/or the latest teacher-notes-review-v*.html file. -->",
+    "<!-- Write critique and requested changes under the relevant headings below. -->",
+    "<!-- These notes are treated as editorial intent by default, not final page copy. -->",
+    "<!-- Focus on teacher usefulness: what to watch for, when to intervene, and what prevents wasted student time. -->",
+    "",
+    "Main Session Objective",
+    "<!-- Add critique or requested changes for the student outcomes. -->",
+    "",
+    "Teacher Focus",
+    "<!-- Add critique or requested changes for the single teacher focus line. -->",
+    "",
+    "Components & Software Required",
+    "Software",
+    "<!-- Add critique or requested changes for software only if needed. -->",
+    "",
+    "Hardware",
+    "<!-- Add critique or requested changes for hardware only if needed. -->",
+    "",
+    "Teacher Highlight Areas",
+    "<!-- Add critique or requested changes for the high-leverage teacher watch-fors. -->",
+    ""
+  ];
+
+  lines.push("Task-by-Task Guidance");
+  lines.push("<!-- Add task-specific critique under the relevant task heading. -->");
+  lines.push("");
+
+  for (const taskTitle of input.taskTitles) {
+    lines.push(taskTitle);
+    lines.push("<!-- Add task-specific critique or requested changes here. -->");
+    lines.push("");
+  }
+
+  lines.push("Most Common Issues");
+  lines.push("<!-- Add issue ideas, misconceptions, or missing teacher moves here. -->");
+  lines.push("");
+  lines.push("Anything Else");
+  lines.push("<!-- Add any other critique or change requests here. -->");
+
+  return lines.join("\n");
 }
 
 async function resolveOrchestratorContentPath(input: {
@@ -4925,25 +5179,74 @@ program.command("clone-survey")
   });
 
 program.command("teacher-notes")
-  .description("Generate canonical-style Teacher Notes from an existing session module and insert the page at the top.")
+  .description("Generate reviewable Teacher Notes from an existing session module, then publish a frozen approved version.")
   .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
   .requiredOption("--page-title <title>", "Canvas page title for the generated Teacher Notes")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
-  .option("--draft", "Publish/update a draft notes page and leave live module placement unchanged", false)
+  .option("--review-notes <text>", "Optional revision notes to apply when generating the next review draft")
+  .option("--review-notes-file <path>", "Optional markdown/text file with revision notes to apply when generating the next review draft")
+  .option("--draft", "Create/update the first draft review page and refresh the local publish-ready artifact", false)
+  .option("--publish", "Publish the current frozen publish-ready Teacher Notes version to the live page", false)
   .option("--dry-run", "Generate and preview without uploading", false)
   .action(async (opts) => {
     const courseId = Number(opts.courseId);
     if (!Number.isFinite(courseId)) {
       throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
     }
+    const sessionName = String(opts.sessionName).trim();
+    if (!sessionName) {
+      throw new Error("Invalid --session-name. Provide a non-empty Canvas module name.");
+    }
+    const rawPageTitle = String(opts.pageTitle).trim();
+    if (!rawPageTitle) {
+      throw new Error("Invalid --page-title. Provide a non-empty Canvas page title.");
+    }
+    if (opts.reviewNotes && opts.reviewNotesFile) {
+      throw new Error("Use either --review-notes or --review-notes-file, not both.");
+    }
+    if (opts.draft && opts.publish) {
+      throw new Error("Use either --draft or --publish, not both.");
+    }
 
-    const sessionName = String(opts.sessionName);
-    const rawPageTitle = String(opts.pageTitle);
-    const isDraftMode = Boolean(opts.draft);
-    const pageTitle = isDraftMode && !/\(draft\)\s*$/i.test(rawPageTitle)
-      ? `${rawPageTitle} (Draft)`
-      : rawPageTitle;
     const client = new CanvasClient();
+    const reviewNotes = opts.reviewNotesFile
+      ? (await fs.readFile(
+          await resolveTeacherNotesReviewNotesFilePath({
+            client,
+            courseId,
+            rawPath: String(opts.reviewNotesFile)
+          }),
+          "utf8"
+        )).trim()
+      : typeof opts.reviewNotes === "string"
+        ? String(opts.reviewNotes).trim()
+        : undefined;
+    const isDraftMode = Boolean(opts.draft);
+    const isPublishMode = Boolean(opts.publish);
+    const isReviewMode = !isDraftMode && !isPublishMode && Boolean(reviewNotes);
+
+    if (isDraftMode && reviewNotes) {
+      throw new Error(
+        "Do not use review notes with --draft. First create/review the draft page, then rerun without --draft for the final publish version."
+      );
+    }
+    if (isPublishMode && reviewNotes) {
+      throw new Error(
+        "Do not use review notes with --publish. First generate a reviewed draft version, then publish the frozen publish-ready file."
+      );
+    }
+    if (!isDraftMode && !isReviewMode && !isPublishMode) {
+      throw new Error(
+        "Choose a workflow step: use --draft to create the first review version, use --review-notes or --review-notes-file to create the next review version, or use --publish to copy the publish-ready version live."
+      );
+    }
+    if (isPublishMode && /\(draft\)\s*$/i.test(rawPageTitle)) {
+      throw new Error("Use the base live page title with --publish, not a title ending in (Draft).");
+    }
+
+    const draftCanvasPageTitle = /\(draft\)\s*$/i.test(rawPageTitle)
+      ? rawPageTitle
+      : `${rawPageTitle} (Draft)`;
     const sessionMeta = parseSessionMetadata(sessionName);
     const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
       client,
@@ -4951,14 +5254,135 @@ program.command("teacher-notes")
       sessionMeta,
       dryRun: Boolean(opts.dryRun)
     });
+    const archivePage = async (pageUrl: string): Promise<string | undefined> => {
+      const current = await client.getPage(courseId, pageUrl);
+      const stamp = new Date().toISOString().replace(/[.:]/g, "-");
+      const archiveTitle = `${current.title} (Archive ${stamp})`;
+      const archived = await client.createPage(courseId, {
+        title: archiveTitle,
+        body: current.body ?? "",
+        published: false
+      });
+      return archived.title ?? undefined;
+    };
 
-    const built = await buildTeacherNotesForSession(client, courseId, sessionName, pageTitle);
+    if (isPublishMode) {
+      let publishReady: Awaited<ReturnType<typeof readTeacherNotesPublishReadyArtifact>>;
+      try {
+        publishReady = await readTeacherNotesPublishReadyArtifact({
+          client,
+          courseId,
+          sessionName
+        });
+      } catch (err) {
+        const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+        if (code === "ENOENT") {
+          throw new Error(
+            `No publish-ready Teacher Notes file exists yet for "${sessionName}". Create a draft or reviewed version first.`
+          );
+        }
+        throw err;
+      }
+
+      if (publishReady.manifest) {
+        if (
+          publishReady.manifest.courseId !== courseId ||
+          normalizeName(publishReady.manifest.sessionName) !== normalizeName(sessionName) ||
+          normalizeName(publishReady.manifest.pageTitle) !== normalizeName(rawPageTitle)
+        ) {
+          throw new Error(
+            "The publish-ready Teacher Notes file does not match this course/session/page-title. Regenerate the review version before publishing."
+          );
+        }
+      }
+
+      const module = await resolveModuleByName(client, courseId, sessionName);
+      const moduleItems = (await client.listModuleItems(courseId, module.id)).sort(
+        (a, b) => a.position - b.position
+      );
+      const insertionPosition = findTeacherNotesInsertionPosition(moduleItems);
+      const existingModulePage = moduleItems.find(
+        (item) =>
+          item.type === "Page" &&
+          normalizeName(item.title) === normalizeName(rawPageTitle) &&
+          !!item.page_url
+      );
+
+      console.log(`Course: ${courseId}`);
+      console.log(`Session module: ${module.name} (${module.id})`);
+      console.log("Mode: publish");
+      console.log(`Teacher notes title: ${rawPageTitle}`);
+      if (publishReady.manifest) {
+        console.log(`Publish-ready version: v${publishReady.manifest.versionNumber}`);
+        console.log(`Publish-ready source mode: ${publishReady.manifest.sourceMode}`);
+      }
+      console.log(`Publish-ready file: ${publishReady.publishReadyPath}`);
+      console.log(`Target module position: ${insertionPosition}`);
+      if (filesScaffoldResult && (opts.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
+        console.log(
+          `${opts.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
+          `${filesScaffoldResult.createdPaths.length}`
+        );
+        for (const folderPath of filesScaffoldResult.createdPaths) {
+          console.log(`+ ${folderPath}`);
+        }
+      }
+
+      if (opts.dryRun) {
+        console.log("Dry run: no Canvas updates performed.");
+        console.log("Publish-ready HTML preview:");
+        console.log(publishReady.notesHtml.split("\n").slice(0, 40).join("\n"));
+        return;
+      }
+
+      let archivedTitle: string | undefined;
+      const pageResult = await upsertCoursePageByTitle({
+        client,
+        courseId,
+        pageTitle: rawPageTitle,
+        bodyHtml: publishReady.notesHtml,
+        published: true,
+        existingPageUrl: existingModulePage?.page_url ?? undefined,
+        beforeUpdate: async (pageUrl) => {
+          archivedTitle = await archivePage(pageUrl);
+        }
+      });
+      const placementResult = await ensureModulePagePlacement({
+        client,
+        courseId,
+        moduleId: module.id,
+        moduleItems,
+        pageTitle: rawPageTitle,
+        pageUrl: pageResult.pageUrl,
+        insertionPosition
+      });
+
+      console.log(pageResult.createdPage ? "Created live page from publish-ready file." : "Updated live page from publish-ready file.");
+      if (archivedTitle) {
+        console.log(`Archived previous page content: ${archivedTitle}`);
+      }
+      if (placementResult.createdModuleItem) console.log("Added page to session module.");
+      if (placementResult.movedModuleItem) console.log("Moved module item to top of session.");
+      if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
+        console.log("Module item placement already correct.");
+      }
+      console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageResult.pageUrl}`);
+      return;
+    }
+
+    const built = await buildTeacherNotesForSession(client, courseId, sessionName, rawPageTitle, {
+      reviewNotes
+    });
 
     console.log(`Course: ${courseId}`);
     console.log(`Session module: ${built.module.name} (${built.module.id})`);
-    console.log(`Mode: ${isDraftMode ? "draft" : "live"}`);
+    console.log(`Mode: ${isDraftMode ? "draft" : "review"}`);
+    if (reviewNotes) {
+      console.log("Review notes: applied");
+    }
     console.log(`Source pages: ${built.modulePages.length}`);
-    console.log(`Teacher notes title: ${pageTitle}`);
+    console.log(`Teacher notes title: ${rawPageTitle}`);
+    console.log(`Draft Canvas title: ${draftCanvasPageTitle}`);
     console.log(`Generation mode: ${built.generationMode}`);
     if (built.generationWarning) {
       console.log(`Generation fallback reason: ${built.generationWarning}`);
@@ -4981,103 +5405,39 @@ program.command("teacher-notes")
       return;
     }
 
-    const normalize = (v: string): string => v.trim().toLowerCase();
-    const archivePage = async (pageUrl: string): Promise<string | undefined> => {
-      const current = await client.getPage(courseId, pageUrl);
-      const stamp = new Date().toISOString().replace(/[.:]/g, "-");
-      const archiveTitle = `${current.title} (Archive ${stamp})`;
-      const archived = await client.createPage(courseId, {
-        title: archiveTitle,
-        body: current.body ?? "",
-        published: false
-      });
-      return archived.title;
-    };
-    const existingModulePage = built.moduleItems.find(
-      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
-    );
+    const artifactResult = await writeTeacherNotesReviewArtifacts({
+      client,
+      courseId,
+      sessionName,
+      pageTitle: rawPageTitle,
+      notesHtml: built.notesHtml,
+      taskTitles: collectTeacherNotesTaskTitles(built.moduleItems),
+      sourceMode: isDraftMode ? "draft" : "review",
+      reviewNotesApplied: Boolean(reviewNotes)
+    });
+    const pageResult = await upsertCoursePageByTitle({
+      client,
+      courseId,
+      pageTitle: draftCanvasPageTitle,
+      bodyHtml: built.notesHtml,
+      published: true
+    });
 
-    let pageUrl: string;
-    let createdPage = false;
-    let createdModuleItem = false;
-    let movedModuleItem = false;
-
-    if (existingModulePage?.page_url) {
-      pageUrl = existingModulePage.page_url;
-      const archivedTitle = isDraftMode ? undefined : await archivePage(pageUrl);
-      await client.updatePage(courseId, pageUrl, {
-        title: pageTitle,
-        body: built.notesHtml,
-        published: true
-      });
-      if (archivedTitle) {
-        console.log(`Archived previous page content: ${archivedTitle}`);
-      }
+    console.log(pageResult.createdPage ? "Created draft review page." : "Updated draft review page.");
+    console.log(`Local review version: v${artifactResult.versionNumber}`);
+    console.log(`Version file: ${artifactResult.versionPath}`);
+    console.log(`Publish-ready file updated: ${artifactResult.publishReadyPath}`);
+    if (artifactResult.createdReviewTemplate) {
+      console.log(`Created review template: ${artifactResult.reviewTemplatePath}`);
     } else {
-      const pages = await client.listPages(courseId, pageTitle);
-      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
-
-      if (existingPage) {
-        pageUrl = existingPage.url;
-        const archivedTitle = isDraftMode ? undefined : await archivePage(pageUrl);
-        await client.updatePage(courseId, pageUrl, {
-          title: pageTitle,
-          body: built.notesHtml,
-          published: true
-        });
-        if (archivedTitle) {
-          console.log(`Archived previous page content: ${archivedTitle}`);
-        }
-      } else {
-        const created = await client.createPage(courseId, {
-          title: pageTitle,
-          body: built.notesHtml,
-          published: true
-        });
-        pageUrl = created.url;
-        createdPage = true;
-      }
+      console.log(`Review template: ${artifactResult.reviewTemplatePath}`);
     }
-
-    if (!isDraftMode) {
-      const moduleItemForPage = built.moduleItems.find(
-        (item) => item.type === "Page" && item.page_url === pageUrl
-      );
-
-      if (!moduleItemForPage) {
-        await client.createModulePageItem(courseId, built.module.id, {
-          title: pageTitle,
-          pageUrl,
-          position: built.insertionPosition,
-          indent: MODULE_ITEM_DEFAULT_INDENT
-        });
-        createdModuleItem = true;
-      } else if (
-        moduleItemForPage.position !== built.insertionPosition ||
-        (moduleItemForPage.indent ?? 0) !== MODULE_ITEM_DEFAULT_INDENT ||
-        normalize(moduleItemForPage.title) !== normalize(pageTitle)
-      ) {
-        await client.updateModuleItemPosition(
-          courseId,
-          built.module.id,
-          moduleItemForPage.id,
-          built.insertionPosition,
-          MODULE_ITEM_DEFAULT_INDENT,
-          pageTitle
-        );
-        movedModuleItem = true;
-      }
-    }
-
-    console.log(createdPage ? "Created page." : "Updated existing page.");
+    console.log(`Draft page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageResult.pageUrl}`);
     if (isDraftMode) {
-      console.log("Draft mode: module placement unchanged.");
+      console.log("Next step: review the draft page in Canvas, then rerun with --review-notes or --review-notes-file to create the next frozen review version.");
     } else {
-      if (createdModuleItem) console.log("Added page to session module.");
-      if (movedModuleItem) console.log("Moved module item to top of session.");
-      if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
+      console.log("Next step: review this revised draft in Canvas. When approved, run the same command with --publish to copy the publish-ready version live.");
     }
-    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
   });
 
 program.command("task-a-section")

@@ -8,12 +8,18 @@ export type TeacherNotesAgentTaskInput = {
   reinforceHints?: string[];
   beginnerHint?: string;
   extensionHint?: string;
+  reviewNotes?: string;
 };
 
 export type TeacherNotesAgentInput = {
   sessionName: string;
   pageTitle: string;
   sessionOverview?: string;
+  modulePageTitles?: string[];
+  contextKeywords?: string[];
+  reviewNotes?: string;
+  currentDraft?: TeacherNotesAgentOutput;
+  reviewCommonIssues?: string[];
   objectiveHints?: string[];
   softwareHints?: string[];
   hardwareHints?: string[];
@@ -130,6 +136,11 @@ export async function generateTeacherNotesFromAgent(
       sessionName: input.sessionName,
       pageTitle: input.pageTitle,
       sessionOverview: input.sessionOverview,
+      modulePageTitles: input.modulePageTitles ?? [],
+      contextKeywords: input.contextKeywords ?? [],
+      reviewNotes: input.reviewNotes,
+      currentDraft: input.currentDraft,
+      reviewCommonIssues: input.reviewCommonIssues ?? [],
       objectiveHints: input.objectiveHints ?? [],
       softwareHints: input.softwareHints ?? [],
       hardwareHints: input.hardwareHints ?? [],

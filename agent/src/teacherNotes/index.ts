@@ -6,12 +6,18 @@ type TeacherNotesTaskContext = {
   reinforceHints?: string[];
   beginnerHint?: string;
   extensionHint?: string;
+  reviewNotes?: string;
 };
 
 type TeacherNotesRequest = {
   sessionName: string;
   pageTitle?: string;
   sessionOverview?: string;
+  modulePageTitles?: string[];
+  contextKeywords?: string[];
+  reviewNotes?: string;
+  currentDraft?: unknown;
+  reviewCommonIssues?: string[];
   objectiveHints?: string[];
   softwareHints?: string[];
   hardwareHints?: string[];
@@ -148,19 +154,42 @@ function buildSystemPrompt(): string {
     "Prefer observable warning signs, preventative checks, and practical teacher moves over generic pedagogy.",
     "Do not copy source notes verbatim.",
     "Do not add filler, motivational language, or broad advice unless it is anchored to the actual task context.",
+    "A strong line should sound obviously tied to this session and would need editing before reuse in another session.",
+    "Only mention software, hardware, teacher highlights, or issues that are grounded in the supplied context.",
+    "If a category is not clearly supported by the supplied context, return an empty array rather than guessing.",
+    "Do not import patterns from other sessions unless they are explicitly present in the supplied context.",
+    "Use the supplied contextKeywords and page titles as anchors. If you cannot tie a line to those anchors, omit it.",
+    "It is better to return fewer strong items than pad the response with generic advice.",
+    "Avoid low-value administrative reminders such as opening the correct link or class unless account access is clearly a major blocker in the source context.",
+    "Teacher focus should be the single highest-leverage thing the teacher should inspect or listen for during the session.",
+    "Highlight areas should feel like the 2-5 things a teacher would underline before class begins.",
+    "Golden nuggets should be sharp teacher observations, checks, or prompts that prevent wasted student time.",
+    "When reviewNotes are supplied, treat them as high-priority revision instructions for the currentDraft while staying faithful to the session evidence.",
+    "If reviewNotes and currentDraft are present, revise the currentDraft rather than starting from scratch.",
+    "Preserve any strong currentDraft content that does not conflict with reviewNotes.",
+    "Review notes are editorial comments, not final page copy.",
+    "Do not repeat review notes verbatim unless a short phrase is already polished final wording.",
+    "Convert review notes into polished teacher-facing lines grounded in the session, not mechanical paraphrases.",
+    "Never output meta commentary such as 'the wording is not correct', 'the first point is fine', or section labels.",
+    "If a reviewer gives rough issue labels like 'wrong measurements', expand them into polished classroom-relevant issue statements.",
+    "If a reviewer says a task is hard, turn that into a practical teacher move or expectation-setting note rather than a blunt warning.",
+    "Implement concrete requested changes such as missing items, wording direction, or emphasis shifts without copying the review note structure.",
+    "reviewCommonIssues are reviewer-supplied issue ideas and should be rewritten into polished issue statements when they fit the session evidence.",
+    "taskContexts[].reviewNotes are task-specific revision notes and should inform that task's outcome, reinforce points, or golden nuggets without being quoted directly.",
     "Use Australian spelling where natural.",
     "Return ONLY valid JSON with keys: sessionObjective, teacherFocus, software, hardware, highlightAreas, tasks, commonIssues, troubleshootingClose.",
-    "sessionObjective: array of 2-3 short teacher-useful statements.",
+    "sessionObjective: array of 2-3 short student outcome statements.",
+    "Every sessionObjective item must begin with 'Students will' or 'Students can'.",
     "teacherFocus: one short sentence.",
     "software: array of 0-6 items.",
     "hardware: array of 0-10 items.",
-    "highlightAreas: array of 3-5 short actionable bullets.",
+    "highlightAreas: array of 2-5 short actionable bullets.",
     "tasks: array matching the task order where possible. Each task object must use keys title, outcome, reinforce, goldenNuggets, beginner, extension.",
     "tasks[].outcome: one short sentence.",
     "tasks[].reinforce: array of 2-5 short points the teacher should reinforce.",
     "tasks[].goldenNuggets: array of 1-3 short, specific teacher insights.",
     "tasks[].beginner and tasks[].extension: one short sentence each.",
-    "commonIssues: array of 4-8 objects with keys issue and teacherMove.",
+    "commonIssues: array of 2-6 objects with keys issue and teacherMove.",
     "commonIssues[].issue: an observable failure pattern or misconception.",
     "commonIssues[].teacherMove: the fastest teacher check or intervention.",
     "troubleshootingClose: one short sentence.",
@@ -173,6 +202,14 @@ function buildUserPrompt(payload: TeacherNotesRequest): string {
     sessionName: payload.sessionName,
     pageTitle: toNonEmptyString(payload.pageTitle),
     sessionOverview: toNonEmptyString(payload.sessionOverview),
+    modulePageTitles: toStringArray(payload.modulePageTitles, 12),
+    contextKeywords: toStringArray(payload.contextKeywords, 24),
+    reviewNotes: toNonEmptyString(payload.reviewNotes),
+    currentDraft:
+      payload.currentDraft && typeof payload.currentDraft === "object"
+        ? payload.currentDraft
+        : undefined,
+    reviewCommonIssues: toStringArray(payload.reviewCommonIssues, 8),
     objectiveHints: toStringArray(payload.objectiveHints, 4),
     softwareHints: toStringArray(payload.softwareHints, 8),
     hardwareHints: toStringArray(payload.hardwareHints, 10),
@@ -186,7 +223,8 @@ function buildUserPrompt(payload: TeacherNotesRequest): string {
           pageSummaries: toStringArray(task.pageSummaries, 6),
           reinforceHints: toStringArray(task.reinforceHints, 6),
           beginnerHint: toNonEmptyString(task.beginnerHint),
-          extensionHint: toNonEmptyString(task.extensionHint)
+          extensionHint: toNonEmptyString(task.extensionHint),
+          reviewNotes: toNonEmptyString(task.reviewNotes)
         }))
       : []
   };
@@ -219,7 +257,7 @@ async function callOpenAi(payload: TeacherNotesRequest, env: Env): Promise<strin
         { role: "user", content: buildUserPrompt(payload) }
       ],
       response_format: { type: "json_object" },
-      temperature: 0.4,
+      temperature: 0,
       max_tokens: 1600
     })
   });
