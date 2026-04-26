@@ -223,46 +223,31 @@ Generate teacher notes from existing session content.
 
 Behavior notes:
 - Uses whole-course session content (not just the target session module) to infer recurring teacher watchpoints.
-- Uses a strict heading template from `apps/cli/src/session/teacherNotesTemplate.ts`, including a guaranteed `Most Common Issues` section.
-- Prefers the `teacher-notes` agent route for tighter teacher-facing guidance and falls back to the legacy heuristic generator if the route is unavailable.
+- Uses a fixed section contract plus template from `docs/teacher-notes-contract.md` and `apps/cli/src/session/teacherNotesTemplate.ts`.
+- Prefers the `teacher-notes` agent route for tight teacher-facing guidance and falls back to the legacy heuristic generator if the route is unavailable.
+- Publishes directly to the live Teacher Notes page and places it under the `Teachers Notes` module subheader with indent.
 
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
-- `--page-title <title>`: Required. Base title for teacher notes page.
+- `--page-title <title>`: Required. Live title for the Teacher Notes page.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
-- `--review-notes <text>`: Optional revision notes to apply when generating the next review version.
-- `--review-notes-file <path>`: Optional markdown/text file with revision notes to apply when generating the next review version.
-- `--draft`: Create/update the first review draft page (`<page-title> (Draft)`), keep live module placement unchanged.
-- `--publish`: Copy the frozen local publish-ready version to the live Canvas page and module placement.
 - `--dry-run`: Generate preview only; no Canvas updates.
 
 Workflow:
-- `--draft`: Generates the first draft, updates the draft Canvas page only, writes `teacher-notes-review-v1.html` plus `teacher-notes-publish-ready.html`, and scaffolds `teacher-notes-review.md` under `apps/cli/session-assets/<course>/<session>/Teacher Notes/` if it does not already exist.
-- `--review-notes` or `--review-notes-file`: Regenerates the draft review page, writes the next versioned HTML file (`teacher-notes-review-v2.html`, `v3`, etc.), and refreshes `teacher-notes-publish-ready.html`.
-- `--publish`: Does not call the agent again. It reads `teacher-notes-publish-ready.html`, archives the existing live page, updates/creates the live page, and inserts/moves it under `Teachers Notes`.
-
-Review artifact behavior:
-- Review notes can be passed as a shorthand session-relative folder path such as `--review-notes-file "Session 02 - Customizing Zippy in 3D/Teacher Notes"`.
-- The CLI infers `apps/cli/session-assets/<course-name>/.../teacher-notes-review.md`.
-- The generated `teacher-notes-review.md` includes the main sections and real task headings for the session so critique stays structured.
-- Final publish should happen only after you have reviewed the revised draft page in Canvas and are satisfied with the frozen publish-ready HTML.
+- The CLI collects the current session pages, extracts structured context, calls the `teacher-notes` agent, validates the response against the runtime contract, renders canonical HTML, then updates or creates the live Canvas page.
+- If a live page already exists, the previous content is archived before overwrite.
+- `--dry-run` shows the generated preview without changing Canvas.
 
 Examples:
 ```bash
-# First review draft
-npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft
+# Live publish
+npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad"
 
-# Draft preview only
-npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
-
-# Reviewed draft iteration (writes next review version and updates the draft page only)
-npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --review-notes-file "Session 03 - The LCD Screen & 3x4 Matrix Keypad/Teacher Notes"
-
-# Final live publish from the frozen publish-ready HTML
-npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --publish
+# Preview only
+npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --dry-run
 
 # npm wrapper form
-npm run dev -- teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
+npm run dev -- teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --dry-run
 ```
 
 ### Command: `task-a-section`

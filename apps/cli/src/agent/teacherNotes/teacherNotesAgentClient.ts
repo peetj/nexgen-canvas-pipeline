@@ -1,4 +1,5 @@
 import { env } from "../../env.js";
+import type { TeacherNotesDomainKey } from "../../session/teacherNotesContract.js";
 
 export type TeacherNotesAgentTaskInput = {
   title: string;
@@ -8,7 +9,6 @@ export type TeacherNotesAgentTaskInput = {
   reinforceHints?: string[];
   beginnerHint?: string;
   extensionHint?: string;
-  reviewNotes?: string;
 };
 
 export type TeacherNotesAgentInput = {
@@ -17,9 +17,7 @@ export type TeacherNotesAgentInput = {
   sessionOverview?: string;
   modulePageTitles?: string[];
   contextKeywords?: string[];
-  reviewNotes?: string;
-  currentDraft?: TeacherNotesAgentOutput;
-  reviewCommonIssues?: string[];
+  detectedDomains?: TeacherNotesDomainKey[];
   objectiveHints?: string[];
   softwareHints?: string[];
   hardwareHints?: string[];
@@ -45,7 +43,6 @@ export type TeacherNotesAgentOutput = {
   highlightAreas: string[];
   tasks: TeacherNotesAgentTaskOutput[];
   commonIssues: Array<{ issue: string; teacherMove: string }>;
-  troubleshootingClose?: string;
 };
 
 function normalizeSingleLine(value: unknown): string | undefined {
@@ -138,9 +135,7 @@ export async function generateTeacherNotesFromAgent(
       sessionOverview: input.sessionOverview,
       modulePageTitles: input.modulePageTitles ?? [],
       contextKeywords: input.contextKeywords ?? [],
-      reviewNotes: input.reviewNotes,
-      currentDraft: input.currentDraft,
-      reviewCommonIssues: input.reviewCommonIssues ?? [],
+      detectedDomains: input.detectedDomains ?? [],
       objectiveHints: input.objectiveHints ?? [],
       softwareHints: input.softwareHints ?? [],
       hardwareHints: input.hardwareHints ?? [],
@@ -173,7 +168,6 @@ export async function generateTeacherNotesFromAgent(
     highlightAreas?: unknown;
     tasks?: unknown;
     commonIssues?: unknown;
-    troubleshootingClose?: unknown;
   };
 
   return {
@@ -183,7 +177,6 @@ export async function generateTeacherNotesFromAgent(
     hardware: normalizeStringArray(body.hardware, 10),
     highlightAreas: normalizeStringArray(body.highlightAreas, 6),
     tasks: normalizeTaskOutputs(body.tasks, 8),
-    commonIssues: normalizeIssueOutputs(body.commonIssues, 8),
-    troubleshootingClose: normalizeSingleLine(body.troubleshootingClose)
+    commonIssues: normalizeIssueOutputs(body.commonIssues, 8)
   };
 }

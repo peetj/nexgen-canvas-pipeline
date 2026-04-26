@@ -6,9 +6,18 @@ import {
 import {
   generateTeacherNotesFromAgent,
   TeacherNotesAgentInput,
+  TeacherNotesAgentTaskInput,
   TeacherNotesAgentOutput
 } from "../agent/teacherNotes/teacherNotesAgentClient.js";
 import { resolveModuleByName } from "./sessionHeaders.js";
+import {
+  detectTeacherNotesDomains,
+  hasTeacherNotesObjectivePrefix,
+  sanitizeTeacherNotesSourceText,
+  TEACHER_NOTES_CONTRACT,
+  type TeacherNotesDomainKey,
+  validateTeacherNotesContent
+} from "./teacherNotesContract.js";
 import { TEACHER_NOTES_TEMPLATE } from "./teacherNotesTemplate.js";
 
 type SessionPageContext = {
@@ -24,9 +33,9 @@ type SessionTask = {
   pages: SessionPageContext[];
 };
 
-type CoursePageContext = SessionPageContext & {
-  moduleId: number;
-  moduleName: string;
+type SessionQuizEvidence = {
+  title?: string;
+  questionStems: string[];
 };
 
 type CommonIssue = {
@@ -73,84 +82,45 @@ type TeacherNotesSourceEvidence = {
   taskKeywordsByTitle: Map<string, Set<string>>;
 };
 
-type TeacherNotesBuildOptions = {
-  reviewNotes?: string;
-};
-
-type ParsedTeacherNotesReview = {
-  objectiveHints: string[];
-  forceHardwareNA: boolean;
-  highlightAreaHints: string[];
-  reviewCommonIssues: string[];
-  taskNotesByTitle: Map<string, string>;
-};
-
 const SOFTWARE_KEYWORDS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\barduino ide\b/i, label: "Arduino IDE" },
   { pattern: /\bserial monitor\b/i, label: "Serial Monitor" },
   { pattern: /\bblender\b/i, label: "Blender" },
   { pattern: /\btinkercad\b/i, label: "Tinkercad" },
+  { pattern: /\bmobile app\b|\bweb application\b|\bweb app\b/i, label: "Mobile web app" },
   { pattern: /\bweb browser\b/i, label: "Web browser (Chrome preferred)" }
 ];
 
 const HARDWARE_KEYWORDS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /\bzippy\b/i, label: "Nexgen Zippy robot" },
   { pattern: /\blcd\b/i, label: "LCD screen module" },
   { pattern: /\b3x4\b|\bmatrix keypad\b|\bkeypad\b/i, label: "3x4 matrix keypad" },
   { pattern: /\besp32\b|\bnodemcu\b/i, label: "NodeMCU ESP32 board" },
+  { pattern: /\besp32-?cam\b|\bcamera\b|\bvideo streaming\b/i, label: "ESP32-CAM / camera module" },
+  { pattern: /\bservo\b/i, label: "Servo motor" },
+  { pattern: /\bmotor driver\b/i, label: "Motor driver module" },
+  { pattern: /\btt motors?\b|\bmotors?\b/i, label: "Drive motors" },
+  { pattern: /\bbatter(?:y|ies)\b|\bbattery pack\b/i, label: "Battery pack / batteries" },
   { pattern: /\bbreadboard\b/i, label: "Breadboard" },
   { pattern: /\bjumper wire/i, label: "Jumper wires" },
   { pattern: /\busb\b/i, label: "USB cable" },
+  { pattern: /\bswitch\b/i, label: "Switch" },
+  { pattern: /\bdc connector\b|\bpower connector\b/i, label: "DC power connector" },
+  { pattern: /\bmobile phone\b|\bphone\b/i, label: "Mobile phone" },
   { pattern: /\bsolder(?:ing)?\b|\bsoldering iron\b/i, label: "Soldering iron" },
   { pattern: /\bflux\b/i, label: "Flux / solder paste" },
   { pattern: /\bmultimeter\b|\bcontinuity\b/i, label: "Multimeter (continuity mode)" },
   { pattern: /\bdesolder(?:ing)?\b|\bsolder wick\b/i, label: "Desoldering braid / solder wick" }
 ];
 
-const COURSE_HIGHLIGHT_SIGNALS: Array<{ pattern: RegExp; point: string }> = [
-  {
-    pattern: /\b(debug|troubleshoot|serial monitor|test)\b/i,
-    point:
-      "Push students to use a visible debug loop: inspect, test, adjust, and retest before asking for fixes."
-  },
-  {
-    pattern: /\b(wiring|pin|connection|diagram)\b/i,
-    point:
-      "Treat wiring verification as mandatory evidence, not a verbal check. Students should trace each connection against the diagram."
-  },
-  {
-    pattern: /\b(upload|compile|port|board)\b/i,
-    point:
-      "Anticipate upload and board-selection friction. Have a rapid board/port checklist ready before students escalate."
-  },
-  {
-    pattern: /\b(solder|soldering|iron|flux|continuity|bridge|cold joint)\b/i,
-    point:
-      "For soldering, prioritize technique checkpoints: iron temperature, joint quality, bridge checks, and continuity testing."
-  },
-  {
-    pattern: /\b(save|checkpoint|version)\b/i,
-    point:
-      "Require checkpoint saves at each working milestone so students can recover from failed experiments quickly."
-  }
-];
-
-// These are treated as system-level authoring rules for all future teacher-notes runs.
-const TEACHER_NOTES_SYSTEM_RULES = {
-  sessionObjectiveLead: "By the end of the session, students should be able to:",
-  sessionTeacherFocus:
-    "Encourage students to explain their thinking, test ideas independently, and iterate before asking for direct fixes.",
-  taskTeacherFocus:
-    "Prompt students to predict outcomes, test one change at a time, and justify their debugging decisions.",
-  troubleshootingClose:
-    "Keep students in a troubleshooting cycle: inspect, test, adjust, then re-test."
-} as const;
+const HEURISTIC_TEACHER_FOCUS_FALLBACK =
+  "Watch for whether students can explain why their next change should work before they continue building.";
 
 export async function buildTeacherNotesForSession(
   client: CanvasClient,
   courseId: number,
   sessionName: string,
-  pageTitle: string,
-  options: TeacherNotesBuildOptions = {}
+  pageTitle: string
 ): Promise<TeacherNotesBuildResult> {
   const module = await resolveModuleByName(client, courseId, sessionName);
   const moduleItems = await client.listModuleItems(courseId, module.id);
@@ -164,11 +134,31 @@ export async function buildTeacherNotesForSession(
     pageTitle,
     pageCache
   );
-  const coursePages = await collectCoursePages(client, courseId, pageTitle, pageCache);
-  const courseInsight = buildCourseInsights(sessionName, modulePages, coursePages);
+  const quizEvidence = await collectModuleQuizEvidence(client, courseId, sortedItems);
   const tasks = resolveTasks(sortedItems, modulePages);
-  const sourceEvidence = buildTeacherNotesSourceEvidence(sessionName, pageTitle, modulePages, tasks);
-  const parsedReview = parseTeacherNotesReviewNotes(options.reviewNotes);
+  const introPages = resolveIntroPages(sortedItems, modulePages);
+  const evidenceText = buildTeacherNotesEvidenceText(modulePages, quizEvidence);
+  const detectedDomains = resolveTeacherNotesDomains(
+    sessionName,
+    pageTitle,
+    introPages,
+    tasks,
+    quizEvidence
+  );
+  const taskContexts = buildTeacherNotesTaskContexts(
+    tasks,
+    sessionName,
+    quizEvidence,
+    detectedDomains
+  );
+  const courseInsight = buildCourseInsights(sessionName, evidenceText, detectedDomains);
+  const sourceEvidence = buildTeacherNotesSourceEvidence(
+    sessionName,
+    pageTitle,
+    modulePages,
+    taskContexts,
+    quizEvidence
+  );
 
   let notesHtml: string;
   let generationMode: "agent" | "heuristic" = "heuristic";
@@ -180,29 +170,31 @@ export async function buildTeacherNotesForSession(
       sessionName,
       sortedItems,
       modulePages,
-      options
+      courseInsight,
+      detectedDomains,
+      quizEvidence,
+      taskContexts
     );
-    const baseAgentOutput = sanitizeTeacherNotesAgentOutput(
-      await generateTeacherNotesFromAgent({
-        ...agentInput,
-        reviewNotes: undefined,
-        currentDraft: undefined
-      }),
-      sourceEvidence
+    const agentOutput = sanitizeTeacherNotesAgentOutput(
+      await generateTeacherNotesFromAgent(agentInput),
+      sourceEvidence,
+      detectedDomains
     );
-    const reviewedAgentOutput = options.reviewNotes
-      ? sanitizeTeacherNotesAgentOutput(
-          await generateTeacherNotesFromAgent({
-            ...agentInput,
-            currentDraft: baseAgentOutput
-          }),
-          sourceEvidence
-        )
-      : baseAgentOutput;
-    const agentOutput = options.reviewNotes
-      ? applyReviewGuidanceFallbacks(reviewedAgentOutput, parsedReview)
-      : reviewedAgentOutput;
-    notesHtml = renderTeacherNotesHtmlFromAgent(pageTitle, agentOutput);
+    const completedAgentOutput = applyContractFallbacks(
+      agentOutput,
+      courseInsight,
+      introPages,
+      taskContexts,
+      sessionName,
+      evidenceText,
+      detectedDomains,
+      quizEvidence
+    );
+    const validation = validateTeacherNotesContent(completedAgentOutput, { detectedDomains });
+    if (validation.errors.length > 0) {
+      throw new Error(`Teacher Notes contract validation failed: ${validation.errors.join(" | ")}`);
+    }
+    notesHtml = renderTeacherNotesHtmlFromAgent(pageTitle, completedAgentOutput);
     generationMode = "agent";
   } catch (err) {
     generationWarning = err instanceof Error ? err.message : String(err);
@@ -211,7 +203,8 @@ export async function buildTeacherNotesForSession(
       sessionName,
       sortedItems,
       modulePages,
-      courseInsight
+      courseInsight,
+      detectedDomains
     );
   }
 
@@ -233,18 +226,18 @@ function buildTeacherNotesAgentInput(
   sessionName: string,
   moduleItems: CanvasModuleItem[],
   modulePages: SessionPageContext[],
-  options: TeacherNotesBuildOptions
+  courseInsight: CourseInsight,
+  detectedDomains: TeacherNotesDomainKey[],
+  quizEvidence: SessionQuizEvidence,
+  taskContexts: TeacherNotesAgentTaskInput[]
 ): TeacherNotesAgentInput {
   const introPages = resolveIntroPages(moduleItems, modulePages);
   const tasks = resolveTasks(moduleItems, modulePages);
-  const fullText = modulePages.map((page) => page.bodyText).join("\n");
-  const parsedReview = parseTeacherNotesReviewNotes(options.reviewNotes);
-  const contextKeywords = extractContextKeywords([
-    sessionName,
-    pageTitle,
-    ...modulePages.map((page) => page.title),
-    ...modulePages.map((page) => page.bodyText)
-  ], 24);
+  const fullText = buildTeacherNotesEvidenceText(modulePages, quizEvidence);
+  const contextKeywords = extractContextKeywords(
+    buildTeacherNotesEvidenceParts(sessionName, pageTitle, modulePages, quizEvidence),
+    24
+  );
 
   return {
     sessionName,
@@ -254,34 +247,18 @@ function buildTeacherNotesAgentInput(
       buildPageExcerpt(fullText, 3, 420),
     modulePageTitles: modulePages.map((page) => page.title),
     contextKeywords,
-    reviewNotes: options.reviewNotes,
-    reviewCommonIssues: parsedReview.reviewCommonIssues,
-    objectiveHints: dedupe([
-      ...buildObjectivePoints(introPages, tasks, sessionName),
-      ...parsedReview.objectiveHints
-    ]).slice(0, 4),
+    detectedDomains,
+    objectiveHints: normalizeStudentObjectives(
+      buildObjectivePoints(introPages, tasks, sessionName, detectedDomains, fullText)
+    ),
     softwareHints: detectComponents(fullText, SOFTWARE_KEYWORDS, []),
-    hardwareHints: parsedReview.forceHardwareNA
-      ? []
-      : detectComponents(fullText, HARDWARE_KEYWORDS, []),
-    highlightAreaHints: parsedReview.highlightAreaHints,
-    commonIssueHints: buildReviewCommonIssueHints(parsedReview.reviewCommonIssues),
-    taskContexts: tasks.map((task) => {
-      const reviewTaskNotes = parsedReview.taskNotesByTitle.get(normalizeTaskReference(task.title));
-      return {
-        title: task.title,
-        pageTitles: task.pages.map((page) => page.title),
-        outcomeHint: buildTaskSummary(task),
-        pageSummaries: task.pages
-          .map((page) => buildPageExcerpt(page.bodyText))
-          .filter((summary): summary is string => Boolean(summary)),
-        reinforceHints: dedupe([
-          ...buildTaskPoints(task),
-          ...buildTaskReviewHints(reviewTaskNotes)
-        ]).slice(0, 5),
-        reviewNotes: reviewTaskNotes
-      };
-    })
+    hardwareHints: detectComponents(fullText, HARDWARE_KEYWORDS, []),
+    highlightAreaHints: courseInsight.highlightAreas,
+    commonIssueHints: buildAgentCommonIssues(tasks, fullText, sessionName, detectedDomains).map((issue) => ({
+      issue: issue.issue,
+      teacherMove: issue.solution
+    })),
+    taskContexts
   };
 }
 
@@ -320,51 +297,158 @@ async function collectModulePages(
   return pages.sort((a, b) => a.position - b.position);
 }
 
-async function collectCoursePages(
+async function collectModuleQuizEvidence(
   client: CanvasClient,
   courseId: number,
-  pageTitle: string,
-  pageCache: Map<string, { bodyHtml: string; bodyText: string }>
-): Promise<CoursePageContext[]> {
-  const modules = await client.listModules(courseId);
-  const sessionModules = modules.filter((module) => /^session\s+\d+/i.test(module.name.trim()));
-  const modulesToScan = sessionModules.length > 0 ? sessionModules : modules;
-
-  const pagesByModule = await Promise.all(
-    modulesToScan.map(async (module) => {
-      const moduleItems = (await client.listModuleItems(courseId, module.id)).sort(
-        (a, b) => a.position - b.position
-      );
-      const teacherNotesRange = findTeacherNotesRange(moduleItems);
-      const pageTitleKey = normalizeLoose(pageTitle);
-      const pageItems = moduleItems.filter(
-        (item) =>
-          item.type === "Page" &&
-          !!item.page_url &&
-          normalizeLoose(item.title) !== pageTitleKey &&
-          !normalizeLoose(item.title).includes("teacher notes") &&
-          !isPositionInRange(item.position, teacherNotesRange)
-      );
-
-      return Promise.all(
-        pageItems.map(async (item) => {
-          const pageUrl = String(item.page_url);
-          const data = await getPageData(client, courseId, pageUrl, pageCache);
-          return {
-            title: item.title,
-            pageUrl,
-            position: item.position,
-            bodyHtml: data.bodyHtml,
-            bodyText: data.bodyText,
-            moduleId: module.id,
-            moduleName: module.name
-          };
-        })
-      );
-    })
+  moduleItems: CanvasModuleItem[]
+): Promise<SessionQuizEvidence> {
+  const primaryQuiz = moduleItems.find(
+    (item) =>
+      item.type === "Quiz" &&
+      !!item.content_id &&
+      !/weekly[-\s]*check-?in/i.test(item.title)
   );
+  if (!primaryQuiz?.content_id) {
+    return { questionStems: [] };
+  }
 
-  return pagesByModule.flat();
+  try {
+    const questions = await client.listQuizQuestions(courseId, Number(primaryQuiz.content_id));
+    return {
+      title: primaryQuiz.title,
+      questionStems: dedupe(
+        questions
+          .map((question) =>
+            sanitizeTeacherNotesSourceText(
+              toPlainText(String(question.question_text ?? question.question_name ?? ""))
+            )
+          )
+          .filter(Boolean)
+      )
+    };
+  } catch {
+    return {
+      title: primaryQuiz.title,
+      questionStems: []
+    };
+  }
+}
+
+function buildTeacherNotesEvidenceParts(
+  sessionName: string,
+  pageTitle: string,
+  modulePages: SessionPageContext[],
+  quizEvidence: SessionQuizEvidence
+): string[] {
+  return [
+    sessionName,
+    pageTitle,
+    ...modulePages.map((page) => page.title),
+    ...modulePages.map((page) => page.bodyText),
+    quizEvidence.title ?? "",
+    ...quizEvidence.questionStems
+  ].filter(Boolean);
+}
+
+function buildTeacherNotesEvidenceText(
+  modulePages: SessionPageContext[],
+  quizEvidence: SessionQuizEvidence
+): string {
+  return [
+    ...modulePages.map((page) => page.bodyText),
+    quizEvidence.title ?? "",
+    ...quizEvidence.questionStems
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function resolveTeacherNotesDomains(
+  sessionName: string,
+  pageTitle: string,
+  introPages: SessionPageContext[],
+  tasks: SessionTask[],
+  quizEvidence: SessionQuizEvidence
+): TeacherNotesDomainKey[] {
+  const active = new Set<TeacherNotesDomainKey>();
+
+  const titleDomains = detectTeacherNotesDomainsFromTitles([
+    sessionName,
+    pageTitle,
+    quizEvidence.title ?? "",
+    ...introPages.map((page) => page.title),
+    ...tasks.flatMap((task) => [task.title, ...task.pages.map((page) => page.title)])
+  ]);
+  for (const domain of titleDomains) {
+    active.add(domain);
+  }
+
+  const introAndQuizDomains = detectTeacherNotesDomains([
+    sessionName,
+    pageTitle,
+    quizEvidence.title ?? "",
+    ...introPages.map((page) => page.title),
+    ...introPages.map((page) => page.bodyText),
+    ...quizEvidence.questionStems
+  ]);
+  for (const domain of introAndQuizDomains) {
+    active.add(domain);
+  }
+
+  for (const task of tasks) {
+    const taskTitleDomains = new Set(
+      detectTeacherNotesDomainsFromTitles([task.title, ...task.pages.map((page) => page.title)])
+    );
+    const taskBodyDomains = new Set(
+      detectTeacherNotesDomains([
+        task.title,
+        ...task.pages.map((page) => page.title),
+        ...task.pages.map((page) => page.bodyText)
+      ])
+    );
+
+    if (taskTitleDomains.size === 0) {
+      for (const domain of taskBodyDomains) {
+        active.add(domain);
+      }
+      continue;
+    }
+
+    if (
+      taskTitleDomains.has("software_setup") &&
+      taskBodyDomains.has("coding_debugging")
+    ) {
+      active.add("coding_debugging");
+    }
+    if (
+      taskTitleDomains.has("coding_debugging") &&
+      taskBodyDomains.has("wiring_electronics")
+    ) {
+      active.add("wiring_electronics");
+    }
+    if (
+      taskTitleDomains.has("wiring_electronics") &&
+      taskBodyDomains.has("coding_debugging")
+    ) {
+      active.add("coding_debugging");
+    }
+  }
+
+  return [...active];
+}
+
+function detectTeacherNotesDomainsFromTitles(parts: string[]): TeacherNotesDomainKey[] {
+  const titles = parts
+    .map((part) => sanitizeTeacherNotesSourceText(part))
+    .filter(Boolean);
+
+  return (Object.entries(TEACHER_NOTES_CONTRACT.domains) as Array<
+    [TeacherNotesDomainKey, (typeof TEACHER_NOTES_CONTRACT.domains)[TeacherNotesDomainKey]]
+  >)
+    .filter(([, domain]) =>
+      titles.some((title) => domain.detectionPatterns.some((pattern) => pattern.test(title)))
+    )
+    .map(([domainKey]) => domainKey);
 }
 
 async function getPageData(
@@ -379,7 +463,7 @@ async function getPageData(
   const page = await client.getPage(courseId, pageUrl);
   const data = {
     bodyHtml: page.body ?? "",
-    bodyText: toPlainText(page.body ?? "")
+    bodyText: sanitizeTeacherNotesSourceText(toPlainText(page.body ?? ""))
   };
   pageCache.set(pageUrl, data);
   return data;
@@ -418,13 +502,20 @@ function renderTeacherNotesHtml(
   sessionName: string,
   moduleItems: CanvasModuleItem[],
   modulePages: SessionPageContext[],
-  courseInsight: CourseInsight
+  courseInsight: CourseInsight,
+  detectedDomains: TeacherNotesDomainKey[]
 ): string {
   const introPages = resolveIntroPages(moduleItems, modulePages);
   const tasks = resolveTasks(moduleItems, modulePages);
   const fullText = modulePages.map((p) => p.bodyText).join("\n");
 
-  const objectivePoints = buildObjectivePoints(introPages, tasks, sessionName);
+  const objectivePoints = buildObjectivePoints(
+    introPages,
+    tasks,
+    sessionName,
+    detectedDomains,
+    fullText
+  );
   const software = detectComponents(fullText, SOFTWARE_KEYWORDS, ["Arduino IDE", "Serial Monitor"]);
   const hardware = detectComponents(fullText, HARDWARE_KEYWORDS, [
     "LCD screen module",
@@ -432,19 +523,28 @@ function renderTeacherNotesHtml(
     "NodeMCU ESP32 board"
   ]);
   const highlightAreas = courseInsight.highlightAreas;
-  const commonIssues = buildCommonIssues(tasks, fullText, courseInsight.issueHints, sessionName);
+  const commonIssues = buildCommonIssues(
+    tasks,
+    fullText,
+    courseInsight.issueHints,
+    sessionName,
+    detectedDomains
+  );
 
   const lines: string[] = [];
   lines.push(`<h2>${escapeHtml(pageTitle)}</h2>`);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mainSessionObjectiveHeading)}</h3>`);
-  lines.push(`<p>${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.sessionObjectiveLead)}</p>`);
   lines.push("<ul>");
-  for (const point of objectivePoints) {
+  for (const point of normalizeStudentObjectives(objectivePoints)) {
     lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
   }
   lines.push("</ul>");
-  lines.push(`<p><strong>Teacher focus:</strong> ${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.sessionTeacherFocus)}</p>`);
-  lines.push("<hr />");
+  lines.push(
+    `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherFocusLabel)}</strong> ${escapeHtml(
+      buildTeacherFocusFallback(courseInsight.highlightAreas)
+    )}</p>`
+  );
+  pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.componentsAndSoftwareHeading)}</h3>`);
   lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.softwareLabel)}</strong></p>`);
   lines.push("<ul>");
@@ -454,12 +554,12 @@ function renderTeacherNotesHtml(
   lines.push("</ul>");
   lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.hardwareLabel)}</strong></p>`);
   lines.push("<ul>");
-  for (const item of hardware) {
+  for (const item of (hardware.length > 0 ? hardware : ["N/A"])) {
     lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
   }
   lines.push("</ul>");
 
-  lines.push("<hr />");
+  pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherHighlightAreasHeading)}</h3>`);
   lines.push("<ul>");
   for (const highlight of highlightAreas) {
@@ -467,14 +567,18 @@ function renderTeacherNotesHtml(
   }
   lines.push("</ul>");
 
-  lines.push("<hr />");
+  pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.taskGuidanceHeading)}</h3>`);
   if (tasks.length === 0) {
-    lines.push("<p>No task headers were detected for this module. Add task subheaders so this section can be expanded automatically.</p>");
+    lines.push("<p>No usable task guidance was found in the current session pages. Update the Task A/B/C page content to expand this section automatically.</p>");
   }
-  for (const task of tasks) {
+  tasks.forEach((task, index) => {
     lines.push(`<h4>${escapeHtml(task.title)}</h4>`);
-    lines.push(`<p>${escapeHtml(buildTaskSummary(task))}</p>`);
+    lines.push(
+      `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.outcomeLabel)}</strong> ${escapeHtml(
+        buildTaskSummary(task)
+      )}</p>`
+    );
 
     const taskPoints = buildTaskPoints(task);
     if (taskPoints.length > 0) {
@@ -486,31 +590,46 @@ function renderTeacherNotesHtml(
       lines.push("</ul>");
     }
     const differentiation = buildTaskDifferentiation(task);
-    lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.differentiationLabel)}</strong></p>`);
-    lines.push("<ul>");
-    lines.push(
-      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.beginnersLabel)}</strong> ${escapeHtml(differentiation.beginner)}</p></li>`
-    );
-    lines.push(
-      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.extensionLabel)}</strong> ${escapeHtml(differentiation.extension)}</p></li>`
-    );
-    lines.push("</ul>");
-    lines.push(`<p><strong>Teacher focus:</strong> ${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.taskTeacherFocus)}</p>`);
-  }
+    if (differentiation) {
+      lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.differentiationLabel)}</strong></p>`);
+      lines.push("<ul>");
+      if (differentiation.beginner) {
+        lines.push(
+          `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.beginnersLabel)}</strong> ${escapeHtml(differentiation.beginner)}</p></li>`
+        );
+      }
+      if (differentiation.extension) {
+        lines.push(
+          `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.extensionLabel)}</strong> ${escapeHtml(differentiation.extension)}</p></li>`
+        );
+      }
+      lines.push("</ul>");
+    }
+    if (index < tasks.length - 1) {
+      pushSectionDivider(lines);
+    }
+  });
 
-  lines.push("<hr />");
+  pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mostCommonIssuesHeading)}</h3>`);
   lines.push("<ul>");
   for (const issue of commonIssues) {
     lines.push("<li>");
-    lines.push(`<p>${escapeHtml(issue.issue)}</p>`);
+    lines.push(
+      `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.issueLabel)}</strong> ${escapeHtml(
+        issue.issue
+      )}</p>`
+    );
     lines.push("<ul>");
-    lines.push(`<li><p><strong>Solution:</strong> ${escapeHtml(issue.solution)}</p></li>`);
+    lines.push(
+      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherMoveLabel)}</strong> ${escapeHtml(
+        issue.solution
+      )}</p></li>`
+    );
     lines.push("</ul>");
     lines.push("</li>");
   }
   lines.push("</ul>");
-  lines.push(`<p>${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.troubleshootingClose)}</p>`);
 
   return lines.join("\n");
 }
@@ -522,7 +641,6 @@ function renderTeacherNotesHtmlFromAgent(
   const lines: string[] = [];
   lines.push(`<h2>${escapeHtml(pageTitle)}</h2>`);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mainSessionObjectiveHeading)}</h3>`);
-  lines.push(`<p>${escapeHtml(TEACHER_NOTES_SYSTEM_RULES.sessionObjectiveLead)}</p>`);
   lines.push("<ul>");
   for (const point of normalizeStudentObjectives(content.sessionObjective)) {
     lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
@@ -530,11 +648,11 @@ function renderTeacherNotesHtmlFromAgent(
   lines.push("</ul>");
   if (content.teacherFocus) {
     lines.push(
-      `<p><strong>Teacher focus:</strong> ${escapeHtml(content.teacherFocus)}</p>`
+      `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherFocusLabel)}</strong> ${escapeHtml(content.teacherFocus)}</p>`
     );
   }
 
-  lines.push("<hr />");
+  pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.componentsAndSoftwareHeading)}</h3>`);
   lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.softwareLabel)}</strong></p>`);
   lines.push("<ul>");
@@ -549,7 +667,7 @@ function renderTeacherNotesHtmlFromAgent(
   }
   lines.push("</ul>");
 
-  lines.push("<hr />");
+  pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherHighlightAreasHeading)}</h3>`);
   lines.push("<ul>");
   for (const highlight of content.highlightAreas) {
@@ -557,15 +675,19 @@ function renderTeacherNotesHtmlFromAgent(
   }
   lines.push("</ul>");
 
-  lines.push("<hr />");
+  pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.taskGuidanceHeading)}</h3>`);
   if (content.tasks.length === 0) {
-    lines.push("<p>No task headers were detected for this module. Add task subheaders so this section can be expanded automatically.</p>");
+    lines.push("<p>No usable task guidance was found in the current session pages. Update the Task A/B/C page content to expand this section automatically.</p>");
   }
-  for (const task of content.tasks) {
+  content.tasks.forEach((task, index) => {
     lines.push(`<h4>${escapeHtml(task.title)}</h4>`);
     if (task.outcome) {
-      lines.push(`<p>${escapeHtml(task.outcome)}</p>`);
+      lines.push(
+        `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.outcomeLabel)}</strong> ${escapeHtml(
+          task.outcome
+        )}</p>`
+      );
     }
     if (task.reinforce.length > 0) {
       lines.push(`<p>${escapeHtml(TEACHER_NOTES_TEMPLATE.reinforceLabel)}</p>`);
@@ -598,15 +720,21 @@ function renderTeacherNotesHtmlFromAgent(
       }
       lines.push("</ul>");
     }
-    lines.push("<hr />");
-  }
+    if (index < content.tasks.length - 1) {
+      pushSectionDivider(lines);
+    }
+  });
 
-  lines.push("<hr />");
+  pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mostCommonIssuesHeading)}</h3>`);
   lines.push("<ul>");
   for (const issue of content.commonIssues) {
     lines.push("<li>");
-    lines.push(`<p>${escapeHtml(issue.issue)}</p>`);
+    lines.push(
+      `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.issueLabel)}</strong> ${escapeHtml(
+        issue.issue
+      )}</p>`
+    );
     lines.push("<ul>");
     lines.push(
       `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherMoveLabel)}</strong> ${escapeHtml(issue.teacherMove)}</p></li>`
@@ -615,25 +743,74 @@ function renderTeacherNotesHtmlFromAgent(
     lines.push("</li>");
   }
   lines.push("</ul>");
-  if (content.troubleshootingClose) {
-    lines.push(`<p>${escapeHtml(content.troubleshootingClose)}</p>`);
-  }
 
   return lines.join("\n");
 }
 
+function pushSectionDivider(lines: string[]): void {
+  if (TEACHER_NOTES_CONTRACT.structure.useHrBetweenSections) {
+    lines.push("<hr />");
+  }
+}
+
+function buildTeacherFocusFallback(highlightAreas: string[]): string {
+  return highlightAreas[0] ?? HEURISTIC_TEACHER_FOCUS_FALLBACK;
+}
+
+function applyContractFallbacks(
+  content: TeacherNotesAgentOutput,
+  courseInsight: CourseInsight,
+  introPages: SessionPageContext[],
+  taskContexts: TeacherNotesAgentTaskInput[],
+  sessionName: string,
+  evidenceText: string,
+  detectedDomains: TeacherNotesDomainKey[],
+  quizEvidence: SessionQuizEvidence
+): TeacherNotesAgentOutput {
+  const fallbackTasks = buildFallbackTaskOutputs(taskContexts);
+  const fallbackObjectives = normalizeStudentObjectives(
+    buildObjectivePoints(introPages, [], sessionName, detectedDomains, evidenceText)
+  );
+  const fallbackIssues = buildAgentCommonIssues([], evidenceText, sessionName, detectedDomains).map((issue) => ({
+    issue: issue.issue,
+    teacherMove: issue.solution
+  }));
+
+  return {
+    ...content,
+    sessionObjective: dedupe([
+      ...content.sessionObjective,
+      ...fallbackObjectives
+    ]).slice(0, TEACHER_NOTES_CONTRACT.mainSessionObjective.maxEntries),
+    teacherFocus: content.teacherFocus ?? buildTeacherFocusFallback(courseInsight.highlightAreas),
+    highlightAreas: dedupe([
+      ...content.highlightAreas,
+      ...courseInsight.highlightAreas
+    ]).slice(0, TEACHER_NOTES_CONTRACT.teacherHighlightAreas.maxEntries),
+    tasks: mergeFallbackTasks(content.tasks, fallbackTasks),
+    commonIssues: dedupeTeacherMoves([
+      ...content.commonIssues,
+      ...fallbackIssues
+    ]).slice(0, TEACHER_NOTES_CONTRACT.mostCommonIssues.maxEntries)
+  };
+}
+
 function sanitizeTeacherNotesAgentOutput(
   content: TeacherNotesAgentOutput,
-  evidence: TeacherNotesSourceEvidence
+  evidence: TeacherNotesSourceEvidence,
+  detectedDomains: TeacherNotesDomainKey[]
 ): TeacherNotesAgentOutput {
   const isLowValueAdminLine = (value: string): boolean =>
-    /\b(link|class link|log ?in|login|open the correct|correct class|access the correct|find the .*class)\b/i.test(
+    /\b(link|class link|joinclass|log ?in|login|open the correct|correct class|access the correct|find the .*class)\b|https?:\/\//i.test(
       value
     );
+  const keepDomainSafeLine = (value: string): boolean =>
+    !hasInactiveDomainLeakage(value, detectedDomains);
   const keepSessionLine = (value: string): boolean =>
     hasContextKeywordOverlap(value, evidence.sessionKeywords) &&
     !isLowValueAdminLine(value) &&
-    !isEditorialReviewMetaLine(value);
+    !isEditorialReviewMetaLine(value) &&
+    keepDomainSafeLine(value);
   const sanitizedTasks = content.tasks.map((task) => {
     const taskKeywords =
       evidence.taskKeywordsByTitle.get(normalizeLoose(task.title)) ?? evidence.sessionKeywords;
@@ -643,31 +820,36 @@ function sanitizeTeacherNotesAgentOutput(
       outcome:
         task.outcome &&
         hasContextKeywordOverlap(task.outcome, taskKeywords) &&
-        !isEditorialReviewMetaLine(task.outcome)
+        !isEditorialReviewMetaLine(task.outcome) &&
+        keepDomainSafeLine(task.outcome)
           ? task.outcome
           : undefined,
       reinforce: task.reinforce.filter(
         (value) =>
           hasContextKeywordOverlap(value, taskKeywords) &&
           !isLowValueAdminLine(value) &&
-          !isEditorialReviewMetaLine(value)
+          !isEditorialReviewMetaLine(value) &&
+          keepDomainSafeLine(value)
       ),
       goldenNuggets: task.goldenNuggets.filter(
         (value) =>
           hasContextKeywordOverlap(value, taskKeywords) &&
           !isLowValueAdminLine(value) &&
-          !isEditorialReviewMetaLine(value)
+          !isEditorialReviewMetaLine(value) &&
+          keepDomainSafeLine(value)
       ),
       beginner:
         task.beginner &&
         hasContextKeywordOverlap(task.beginner, taskKeywords) &&
-        !isEditorialReviewMetaLine(task.beginner)
+        !isEditorialReviewMetaLine(task.beginner) &&
+        keepDomainSafeLine(task.beginner)
           ? task.beginner
           : undefined,
       extension:
         task.extension &&
         hasContextKeywordOverlap(task.extension, taskKeywords) &&
-        !isEditorialReviewMetaLine(task.extension)
+        !isEditorialReviewMetaLine(task.extension) &&
+        keepDomainSafeLine(task.extension)
           ? task.extension
           : undefined
     };
@@ -685,32 +867,53 @@ function sanitizeTeacherNotesAgentOutput(
       hasContextKeywordOverlap(item.issue, evidence.sessionKeywords) &&
       hasContextKeywordOverlap(item.teacherMove, evidence.sessionKeywords) &&
       !isEditorialReviewMetaLine(item.issue) &&
-      !isEditorialReviewMetaLine(item.teacherMove)
+      !isEditorialReviewMetaLine(item.teacherMove) &&
+      keepDomainSafeLine(item.issue) &&
+      keepDomainSafeLine(item.teacherMove)
   );
   const teacherFocus =
     content.teacherFocus &&
     hasContextKeywordOverlap(content.teacherFocus, evidence.sessionKeywords) &&
-    !isEditorialReviewMetaLine(content.teacherFocus)
+    !isEditorialReviewMetaLine(content.teacherFocus) &&
+    keepDomainSafeLine(content.teacherFocus)
       ? content.teacherFocus
-      : highlightAreas[0];
-  const troubleshootingClose =
-    content.troubleshootingClose &&
-    hasContextKeywordOverlap(content.troubleshootingClose, evidence.sessionKeywords) &&
-    !isEditorialReviewMetaLine(content.troubleshootingClose)
-      ? content.troubleshootingClose
-      : undefined;
+      : buildTeacherFocusFallback(highlightAreas);
 
   return {
     ...content,
-    sessionObjective: normalizeStudentObjectives(content.sessionObjective).filter(keepSessionLine),
+    sessionObjective: normalizeStudentObjectives(content.sessionObjective)
+      .filter(
+        (value) => !isLowValueAdminLine(value) && !isEditorialReviewMetaLine(value)
+      )
+      .filter((value) => !isPromotionalObjectiveSentence(value))
+      .filter(keepDomainSafeLine)
+      .filter(hasTeacherNotesObjectivePrefix),
     teacherFocus,
     software: content.software.filter(keepSessionLine),
     hardware: content.hardware.filter(keepSessionLine),
     highlightAreas,
     tasks: sanitizedTasks,
-    commonIssues,
-    troubleshootingClose
+    commonIssues: commonIssues.slice(
+      0,
+      TEACHER_NOTES_CONTRACT.mostCommonIssues.maxEntries
+    )
   };
+}
+
+function hasInactiveDomainLeakage(
+  value: string,
+  detectedDomains: TeacherNotesDomainKey[]
+): boolean {
+  if (detectedDomains.length === 0) return false;
+
+  const active = new Set(detectedDomains);
+  return (Object.entries(TEACHER_NOTES_CONTRACT.domains) as Array<
+    [TeacherNotesDomainKey, (typeof TEACHER_NOTES_CONTRACT.domains)[TeacherNotesDomainKey]]
+  >).some(
+    ([domainKey, domain]) =>
+      !active.has(domainKey) &&
+      domain.leakageSignals.some((pattern) => pattern.test(value))
+  );
 }
 
 function normalizeStudentObjectives(values: string[]): string[] {
@@ -724,8 +927,11 @@ function normalizeStudentObjective(value: string): string {
   const lowered = cleaned.toLowerCase();
   const withPeriod = /[.!?]$/.test(cleaned) ? cleaned : `${cleaned}.`;
 
-  if (/^students?\s+(will|can|should)\b/i.test(cleaned)) {
+  if (/^students?\s+(will|can)\b/i.test(cleaned)) {
     return withPeriod;
+  }
+  if (/^students?\s+should\b/i.test(cleaned)) {
+    return withPeriod.replace(/^students?\s+should\b/i, "Students will");
   }
   const guideMatch = cleaned.match(/^guide students?\s+(through|in|to)\s+(.+)$/i);
   if (guideMatch) {
@@ -752,7 +958,9 @@ function normalizeStudentObjective(value: string): string {
     return "";
   }
 
-  return withPeriod;
+  const phrase = withPeriod.replace(/[.!?]+$/, "").trim();
+  if (!phrase) return "";
+  return `Students will ${phrase.charAt(0).toLowerCase()}${phrase.slice(1)}.`;
 }
 
 function toStudentOutcomePhrase(value: string): string {
@@ -791,29 +999,29 @@ function buildTeacherNotesSourceEvidence(
   sessionName: string,
   pageTitle: string,
   modulePages: SessionPageContext[],
-  tasks: SessionTask[]
+  taskContexts: TeacherNotesAgentTaskInput[],
+  quizEvidence: SessionQuizEvidence
 ): TeacherNotesSourceEvidence {
   const sessionKeywords = new Set(
     extractContextKeywords(
-      [
-        sessionName,
-        pageTitle,
-        ...modulePages.map((page) => page.title),
-        ...modulePages.map((page) => page.bodyText)
-      ],
+      buildTeacherNotesEvidenceParts(sessionName, pageTitle, modulePages, quizEvidence),
       28
     )
   );
   const taskKeywordsByTitle = new Map<string, Set<string>>();
-  for (const task of tasks) {
+  for (const task of taskContexts) {
     taskKeywordsByTitle.set(
       normalizeLoose(task.title),
       new Set(
         extractContextKeywords(
           [
             task.title,
-            ...task.pages.map((page) => page.title),
-            ...task.pages.map((page) => page.bodyText)
+            ...(task.pageTitles ?? []),
+            task.outcomeHint ?? "",
+            ...(task.pageSummaries ?? []),
+            ...(task.reinforceHints ?? []),
+            task.beginnerHint ?? "",
+            task.extensionHint ?? ""
           ],
           18
         )
@@ -821,6 +1029,349 @@ function buildTeacherNotesSourceEvidence(
     );
   }
   return { sessionKeywords, taskKeywordsByTitle };
+}
+
+function hasUsableTaskContent(task: SessionTask): boolean {
+  return task.pages.some((page) => page.bodyText.trim().length > 0);
+}
+
+function buildTeacherNotesTaskContexts(
+  tasks: SessionTask[],
+  sessionName: string,
+  quizEvidence: SessionQuizEvidence,
+  detectedDomains: TeacherNotesDomainKey[]
+): TeacherNotesAgentTaskInput[] {
+  const usableTasks = tasks.filter(hasUsableTaskContent);
+  if (usableTasks.length > 0) {
+    return usableTasks.map((task) => buildTeacherNotesTaskContext(task));
+  }
+  return buildSyntheticTaskContexts(
+    tasks.map((task) => task.title),
+    sessionName,
+    quizEvidence,
+    detectedDomains
+  );
+}
+
+function buildTeacherNotesTaskContext(task: SessionTask): TeacherNotesAgentTaskInput {
+  const differentiation = buildTaskDifferentiation(task);
+  return {
+    title: task.title,
+    pageTitles: task.pages.map((page) => page.title),
+    outcomeHint: buildTaskSummary(task),
+    pageSummaries: task.pages
+      .map((page) => buildPageExcerpt(page.bodyText))
+      .filter((summary): summary is string => Boolean(summary)),
+    reinforceHints: buildTaskPoints(task),
+    beginnerHint: differentiation?.beginner,
+    extensionHint: differentiation?.extension
+  };
+}
+
+function buildSyntheticTaskContexts(
+  taskTitles: string[],
+  sessionName: string,
+  quizEvidence: SessionQuizEvidence,
+  detectedDomains: TeacherNotesDomainKey[]
+): TeacherNotesAgentTaskInput[] {
+  const questionText = [quizEvidence.title ?? "", ...quizEvidence.questionStems].join(" ").toLowerCase();
+  const has = (pattern: RegExp): boolean => pattern.test(questionText);
+  const titles =
+    taskTitles.length > 0 ? taskTitles : buildDefaultTaskTitles(sessionName, 3);
+
+  let templates: Array<Omit<TeacherNotesAgentTaskInput, "title">>;
+
+  if (detectedDomains.includes("cad_3d")) {
+    templates = [
+      {
+        pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
+        outcomeHint: "Use Tinkercad tools accurately before starting the main customisation.",
+        reinforceHints: dedupe([
+          "Check that students can navigate the Tinkercad workspace without hunting for basic tools.",
+          has(/\bbasic shape\b|\bshape\b/)
+            ? "Push students to start from a small number of deliberate basic shapes before adding detail."
+            : "",
+          has(/\bgroup\b/)
+            ? "Make students line shapes up precisely before grouping and explain what grouping changes in the model."
+            : "",
+          "Treat keyboard shortcuts, snap grid, and precise placement as accuracy tools, not optional extras."
+        ]).slice(0, 4)
+      },
+      {
+        pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
+        outcomeHint: "Create a Zippy customisation with a clear design purpose and workable fit.",
+        reinforceHints: dedupe([
+          has(/\bextrude\b/)
+            ? "Ask students to explain what their extrusion or cut is doing to the model before approving it."
+            : "",
+          "Check fit, clearance, and connection points before students commit to decorative detail.",
+          "Stop decorative drift by asking what the change improves: fit, function, or appearance.",
+          has(/\bgroup\b/)
+            ? "Watch for grouped shapes that hide imprecise placement or make later edits harder."
+            : ""
+        ]).slice(0, 4),
+        beginnerHint:
+          "Keep the change to one clean, well-positioned custom feature that still fits the existing body cleanly.",
+        extensionHint:
+          "Add a second feature only if it improves function or visual impact without making the design harder to print."
+      },
+      {
+        pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
+        outcomeHint: "Check print readiness and save a clean version of the design for later build work.",
+        reinforceHints: dedupe([
+          has(/\bfile format\b|\bstl\b|\b3d print/i)
+            ? "Check that students know which export or file format is appropriate before they claim the design is finished."
+            : "",
+          "Require one final fit and printability check before students move on.",
+          "Make students save a clearly named version once the model is ready for review or printing."
+        ]).slice(0, 4)
+      }
+    ];
+  } else if (detectedDomains.includes("demo_orientation")) {
+    templates = [
+      {
+        pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
+        outcomeHint: "Identify the standout features and subsystems that make the Zippy demo work.",
+        reinforceHints: dedupe([
+          has(/\bbattery\b/)
+            ? "Ask students to identify the battery or power source and explain what it enables on Zippy."
+            : "",
+          has(/\bvideo streaming\b|\bcamera\b/)
+            ? "Have students point out the camera or video-streaming feature and explain what it adds to the robot."
+            : "",
+          has(/\bmotor\b|\bmovement\b/)
+            ? "Check whether students can identify the movement system rather than describing motion in vague terms."
+            : "",
+          "Stop passive watching by asking students to name the exact system behind one observed behaviour."
+        ]).slice(0, 4)
+      },
+      {
+        pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
+        outcomeHint: "Explain how Zippy's power, control, movement, and communication systems work together during the demo.",
+        reinforceHints: dedupe([
+          has(/\bcontrol\b/)
+            ? "Listen for whether students can explain how Zippy is controlled, not just name a controller or input."
+            : "",
+          has(/\bcommunication\b|\bwifi\b|\bbluetooth\b/)
+            ? "Check that students can distinguish communication from power or control when they describe the robot."
+            : "",
+          "Ask students to predict what would fail first if one subsystem was removed or disconnected."
+        ]).slice(0, 4)
+      },
+      {
+        pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
+        outcomeHint: "Use the demo as a reference point for later build and customisation sessions.",
+        reinforceHints: dedupe([
+          "Make students link one demo feature to a later build, coding, or customisation session before moving on.",
+          "Have confident students predict which subsystem they would most like to customise first and why.",
+          "Use quick compare-and-explain questions so the session feels active rather than presentational."
+        ]).slice(0, 4)
+      }
+    ];
+  } else if (detectedDomains.includes("soldering")) {
+    templates = [
+      {
+        outcomeHint: "Prepare tools, parts, and the work area so the first joints are controlled and safe.",
+        reinforceHints: [
+          "Check iron handling, workspace setup, and component orientation before students begin soldering.",
+          "Make students tin, position, and inspect simple parts before they move to denser joints."
+        ]
+      },
+      {
+        outcomeHint: "Solder the main components systematically and inspect each joint before moving on.",
+        reinforceHints: [
+          "Inspect for shiny joints, correct wetting, and no solder bridges before students continue.",
+          "Pause on polarity and lead placement before heat makes rework expensive."
+        ]
+      },
+      {
+        outcomeHint: "Diagnose weak joints or faults by inspecting, testing continuity, and reworking with purpose.",
+        reinforceHints: [
+          "Require continuity or visual inspection before power-on.",
+          "Ask students to explain whether a fault is likely a bridge, cold joint, polarity mistake, or wiring issue."
+        ]
+      }
+    ];
+  } else if (
+    detectedDomains.includes("coding_debugging") &&
+    detectedDomains.includes("wiring_electronics")
+  ) {
+    templates = [
+      {
+        outcomeHint: "Verify the core wiring and power path before any code changes are made.",
+        reinforceHints: [
+          "Make students trace power, ground, and signal separately before they upload or test anything.",
+          "Check connector orientation and cable placement before deeper troubleshooting."
+        ]
+      },
+      {
+        outcomeHint: "Upload or modify code in a controlled way and test one change at a time.",
+        reinforceHints: [
+          "Force one change, one test, one explanation.",
+          "Use upload, error, or behaviour changes as evidence instead of guessing."
+        ]
+      },
+      {
+        outcomeHint: "Integrate the full system, test behaviour, and isolate faults systematically.",
+        reinforceHints: [
+          "Make students explain whether the next suspected fault is wiring, code, or hardware and why.",
+          "Require a known-good checkpoint before students attempt extensions."
+        ]
+      }
+    ];
+  } else if (detectedDomains.includes("mechanical_build")) {
+    templates = [
+      {
+        outcomeHint: "Prepare the printed parts, tools, and fasteners before permanent assembly begins.",
+        reinforceHints: [
+          "Check part clean-up, screw choice, and tool selection before students start fastening anything.",
+          "Stop students from forcing parts together when a fit issue should be cleaned up first."
+        ]
+      },
+      {
+        outcomeHint: "Assemble the main structure in the correct order while protecting alignment.",
+        reinforceHints: [
+          "Watch build order closely so students do not lock in a part that blocks later assembly.",
+          "Check hinge, orientation, and fastener placement before anything is tightened fully."
+        ]
+      },
+      {
+        outcomeHint: "Finish fit, fastening, and final checks so the build is stable and ready for later wiring or testing.",
+        reinforceHints: [
+          "Make students test fit and movement before they call the task complete.",
+          "Ask students to identify one alignment or fit risk before they move on."
+        ]
+      }
+    ];
+  } else if (detectedDomains.includes("wiring_electronics")) {
+    templates = [
+      {
+        outcomeHint: "Wire the first subsystem carefully against the diagram and verify each connection.",
+        reinforceHints: [
+          "Have students trace each connection aloud against the diagram one at a time.",
+          "Separate power, ground, and signal checks instead of treating the whole circuit as one mystery."
+        ]
+      },
+      {
+        outcomeHint: "Build or test the main circuit while catching the most likely miswires early.",
+        reinforceHints: [
+          "Check breadboard rows, pin order, and labelled signals before students power the circuit.",
+          "Use one small test to prove the circuit is behaving as expected before extending it."
+        ]
+      },
+      {
+        outcomeHint: "Explain how the circuit should behave and isolate faults systematically if it does not.",
+        reinforceHints: [
+          "Ask what evidence would prove the issue is in wiring rather than code or hardware.",
+          "Require one correction at a time, followed by an immediate retest."
+        ]
+      }
+    ];
+  } else if (detectedDomains.includes("theory_concepts")) {
+    templates = [
+      {
+        outcomeHint: "Identify the key components or concepts that matter in this session.",
+        reinforceHints: [
+          "Ask students to name the part or concept and then explain its purpose in plain language.",
+          "Use short compare-and-contrast questions to expose shallow memorisation early."
+        ]
+      },
+      {
+        outcomeHint: "Apply the concept to a practical example instead of leaving it at a definition level.",
+        reinforceHints: [
+          "Push students to connect the concept to a real part, signal, or robot behaviour.",
+          "Check whether students can explain why the concept matters to the build."
+        ]
+      },
+      {
+        outcomeHint: "Use the concept as a basis for prediction, troubleshooting, or extension thinking.",
+        reinforceHints: [
+          "Ask students what they would expect to happen if one key part or idea changed.",
+          "Listen for cause-and-effect explanations, not just repeated terms."
+        ]
+      }
+    ];
+  } else {
+    templates = [
+      {
+        outcomeHint: "Build confidence with the core tools, ideas, or parts introduced in this session.",
+        reinforceHints: [
+          "Check that students can explain what they are doing and why before they move on.",
+          "Use a short checkpoint so misunderstandings are corrected early."
+        ]
+      },
+      {
+        outcomeHint: "Complete the main practical task with deliberate choices and visible checks for quality.",
+        reinforceHints: [
+          "Ask students to justify their next change before they make it.",
+          "Require one test or verification step before students call the task complete."
+        ]
+      },
+      {
+        outcomeHint: "Reflect on the result, fix one issue, and connect the work to the next stage of the project.",
+        reinforceHints: [
+          "Get students to explain one thing that worked and one thing they still need to improve.",
+          "Link the task back to the wider project so students understand why it matters."
+        ]
+      }
+    ];
+  }
+
+  return titles.map((title, index) => ({
+    title,
+    ...(templates[Math.min(index, templates.length - 1)] ?? templates[templates.length - 1])
+  }));
+}
+
+function buildDefaultTaskTitles(sessionName: string, count: number): string[] {
+  const match = sessionName.match(/^(Session\s+\d+)/i);
+  const sessionLabel = match?.[1] ?? "Session";
+  return Array.from({ length: count }, (_, index) =>
+    `${sessionLabel}: Task ${String.fromCharCode(65 + index)}`
+  );
+}
+
+function buildFallbackTaskOutputs(
+  taskContexts: TeacherNotesAgentTaskInput[]
+): TeacherNotesAgentOutput["tasks"] {
+  return taskContexts.map((task) => ({
+    title: task.title,
+    outcome: task.outcomeHint,
+    reinforce: dedupe(task.reinforceHints ?? []).slice(0, 5),
+    goldenNuggets: [],
+    beginner: task.beginnerHint,
+    extension: task.extensionHint
+  }));
+}
+
+function mergeFallbackTasks(
+  primary: TeacherNotesAgentOutput["tasks"],
+  fallback: TeacherNotesAgentOutput["tasks"]
+): TeacherNotesAgentOutput["tasks"] {
+  if (fallback.length === 0) return primary;
+  if (primary.length === 0) return fallback;
+
+  const fallbackByTitle = new Map(fallback.map((task) => [normalizeLoose(task.title), task]));
+  const merged = primary.map((task) => {
+    const candidate = fallbackByTitle.get(normalizeLoose(task.title));
+    if (!candidate) return task;
+    return {
+      title: task.title,
+      outcome: task.outcome ?? candidate.outcome,
+      reinforce: dedupe([...task.reinforce, ...candidate.reinforce]).slice(0, 5),
+      goldenNuggets: dedupe(task.goldenNuggets).slice(0, 3),
+      beginner: task.beginner ?? candidate.beginner,
+      extension: task.extension ?? candidate.extension
+    };
+  });
+
+  for (const candidate of fallback) {
+    if (!merged.some((task) => normalizeLoose(task.title) === normalizeLoose(candidate.title))) {
+      merged.push(candidate);
+    }
+  }
+
+  return merged;
 }
 
 function isEditorialReviewMetaLine(value: string): boolean {
@@ -852,260 +1403,57 @@ function isEditorialReviewMetaLine(value: string): boolean {
   );
 }
 
-function buildReviewCommonIssueHints(
-  issues: string[]
-): Array<{ issue: string; teacherMove: string }> {
-  return issues.map((issue) => buildReviewCommonIssueHint(issue));
-}
-
-function buildReviewCommonIssueHint(issue: string): { issue: string; teacherMove: string } {
-  const lowered = issue.toLowerCase();
-  if (/\bwrong\b.*\bmeasure|\bmeasure/.test(lowered)) {
-    return {
-      issue: "Students size features by eye, so the model no longer fits the Zippy chassis cleanly.",
-      teacherMove: "Stop the design and have students measure against the chassis or sketch before they continue modelling in Tinkercad."
-    };
-  }
-  if (/\bconstraint|unprintable|print/.test(lowered)) {
-    return {
-      issue: "Students create model features that are hard to print or too fragile to work on Zippy.",
-      teacherMove: "Ask students to justify wall thickness, overhangs, and support needs before they keep refining the Tinkercad model."
-    };
-  }
-  if (/\bclearance|component|robot/.test(lowered)) {
-    return {
-      issue: "Students place model features where they clash with nearby robot components or usable chassis space.",
-      teacherMove: "Make students point out the clearances around the chassis before approving the Tinkercad design direction."
-    };
-  }
-  return {
-    issue: `Students run into this design problem: ${issue.replace(SPACE_RE, " ").trim()}.`,
-    teacherMove: "Turn this into a quick teacher checkpoint before students keep modelling in Tinkercad."
-  };
-}
-
-function buildTaskReviewHints(reviewNotes: string | undefined): string[] {
-  if (!reviewNotes) return [];
-  const lowered = reviewNotes.toLowerCase();
-  const hints: string[] = [];
-
-  if (/\bhard|challeng/.test(lowered)) {
-    hints.push("Frame this as challenge work so students know it is not a core requirement for everyone.");
-  }
-  if (/\bsimpler|simplified|same characteristics|essential characteristics/.test(lowered)) {
-    hints.push("If students stall, steer them toward a simpler version that keeps the key characteristics of the idea.");
-  }
-
-  return hints;
-}
-
-function buildReviewHighlightFallbacks(hints: string[]): string[] {
-  const fallbacks: string[] = [];
-  for (const hint of hints) {
-    const lowered = hint.toLowerCase();
-    if (/\bname|initial|file/.test(lowered)) {
-      fallbacks.push(
-        "Make file naming explicit early so students can find the right Tinkercad version quickly during feedback and troubleshooting."
-      );
-    }
-    if (/\bsketch|discuss|collabor|validate/.test(lowered)) {
-      fallbacks.push(
-        "Use a quick sketch-and-explain checkpoint before modelling so weak ideas are corrected before students sink time into them."
-      );
-    }
-  }
-  return dedupe(fallbacks).slice(0, 3);
-}
-
-function buildTaskReviewFallbackNuggets(reviewNotes: string | undefined): string[] {
-  if (!reviewNotes) return [];
-  const lowered = reviewNotes.toLowerCase();
-  const nuggets: string[] = [];
-
-  if (/\bhard|challeng/.test(lowered)) {
-    nuggets.push(
-      "Set expectations clearly: this is challenge work, not the core success criterion for every student."
-    );
-  }
-  if (/\bsimpler|simplified|same characteristics|essential characteristics/.test(lowered)) {
-    nuggets.push(
-      "If students understand the idea but cannot model the full form, allow a simpler version that keeps the key characteristics."
-    );
-  }
-
-  return dedupe(nuggets).slice(0, 2);
-}
-
-function classifyReviewTheme(value: string): string {
-  const lowered = value.toLowerCase();
-  if (/\bname|initial|file/.test(lowered)) return "naming";
-  if (/\bsketch|discuss|collabor|validate/.test(lowered)) return "sketch";
-  if (/\bmeasure|size|dimension/.test(lowered)) return "measurement";
-  if (/\bconstraint|unprintable|print|fragile|wall thickness|overhang/.test(lowered)) {
-    return "printability";
-  }
-  if (/\bclearance|component|robot|chassis space|fit\b/.test(lowered)) return "clearance";
-  return lowered.replace(SPACE_RE, " ").trim();
-}
-
-function applyReviewGuidanceFallbacks(
-  content: TeacherNotesAgentOutput,
-  parsedReview: ParsedTeacherNotesReview
-): TeacherNotesAgentOutput {
-  const existingHighlightThemes = new Set(content.highlightAreas.map((item) => classifyReviewTheme(item)));
-  const fallbackHighlights = buildReviewHighlightFallbacks(parsedReview.highlightAreaHints).filter(
-    (item) => !existingHighlightThemes.has(classifyReviewTheme(item))
-  );
-  const highlightAreas = dedupe([
-    ...content.highlightAreas,
-    ...fallbackHighlights
-  ]).slice(0, 5);
-
-  const existingIssueThemes = new Set(content.commonIssues.map((item) => classifyReviewTheme(item.issue)));
-  const fallbackIssues = buildReviewCommonIssueHints(parsedReview.reviewCommonIssues).filter(
-    (item) => !existingIssueThemes.has(classifyReviewTheme(item.issue))
-  );
-  const commonIssues = dedupeIssues([
-    ...content.commonIssues.map((item) => ({ issue: item.issue, solution: item.teacherMove })),
-    ...fallbackIssues.map((item) => ({
-      issue: item.issue,
-      solution: item.teacherMove
-    }))
-  ]).map((item) => ({ issue: item.issue, teacherMove: item.solution })).slice(0, 6);
-
-  const tasks = content.tasks.map((task) => {
-    const reviewNote = parsedReview.taskNotesByTitle.get(normalizeTaskReference(task.title));
-    const fallbackNuggets = buildTaskReviewFallbackNuggets(reviewNote);
-    if (fallbackNuggets.length === 0) return task;
-    return {
-      ...task,
-      goldenNuggets: dedupe([...task.goldenNuggets, ...fallbackNuggets]).slice(0, 3)
-    };
-  });
-
-  return {
-    ...content,
-    highlightAreas,
-    commonIssues,
-    tasks
-  };
-}
-
-function parseTeacherNotesReviewNotes(reviewNotes: string | undefined): ParsedTeacherNotesReview {
-  const result: ParsedTeacherNotesReview = {
-    objectiveHints: [],
-    forceHardwareNA: false,
-    highlightAreaHints: [],
-    reviewCommonIssues: [],
-    taskNotesByTitle: new Map<string, string>()
-  };
-  if (!reviewNotes) return result;
-
-  const lines = reviewNotes
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  let activeSection: "objective" | "highlights" | "issues" | "task" | undefined;
-  let activeTaskKey: string | undefined;
-
-  for (const line of lines) {
-    if (/horizontal rule/i.test(line)) {
-      continue;
-    }
-    if (/\bhardware\b/i.test(line) && /\bn\/?a\b/i.test(line)) {
-      result.forceHardwareNA = true;
-    }
-    if (/^main session objective$/i.test(line)) {
-      activeSection = "objective";
-      activeTaskKey = undefined;
-      continue;
-    }
-    if (
-      /^teacher focus$/i.test(line) ||
-      /^components\s*&\s*software required$/i.test(line) ||
-      /^software$/i.test(line) ||
-      /^hardware$/i.test(line) ||
-      /^anything else$/i.test(line)
-    ) {
-      activeSection = undefined;
-      activeTaskKey = undefined;
-      continue;
-    }
-    if (/teacher highlight areas/i.test(line)) {
-      activeSection = "highlights";
-      activeTaskKey = undefined;
-      continue;
-    }
-    if (/most common issues/i.test(line)) {
-      activeSection = "issues";
-      activeTaskKey = undefined;
-      continue;
-    }
-
-    const taskMatch = line.match(/^(Session\s+\d+.*Task\s+[A-Za-z0-9]+)/i);
-    if (taskMatch) {
-      activeSection = "task";
-      activeTaskKey = normalizeTaskReference(taskMatch[1]);
-      continue;
-    }
-
-    if (isEditorialReviewMetaLine(line)) {
-      continue;
-    }
-
-    if (
-      /^by the end of the session/i.test(line) ||
-      /issue with/i.test(line) ||
-      /task by task/i.test(line)
-    ) {
-      if (/^by the end of the session/i.test(line) && activeSection === "objective") {
-        continue;
-      }
-      activeSection = undefined;
-      activeTaskKey = undefined;
-      continue;
-    }
-
-    if (activeSection === "objective") {
-      if (/^students?\s+(will|can|should)\b/i.test(line)) {
-        result.objectiveHints.push(line);
-      }
-      continue;
-    }
-    if (activeSection === "highlights") {
-      result.highlightAreaHints.push(line);
-      continue;
-    }
-    if (activeSection === "issues") {
-      result.reviewCommonIssues.push(line);
-      continue;
-    }
-    if (activeSection === "task" && activeTaskKey) {
-      const previous = result.taskNotesByTitle.get(activeTaskKey);
-      result.taskNotesByTitle.set(activeTaskKey, previous ? `${previous}\n${line}` : line);
-    }
-  }
-
-  result.objectiveHints = dedupe(result.objectiveHints).slice(0, 3);
-  result.highlightAreaHints = dedupe(result.highlightAreaHints).slice(0, 5);
-  result.reviewCommonIssues = dedupe(result.reviewCommonIssues).slice(0, 6);
-  return result;
-}
-
 function buildObjectivePoints(
   introPages: SessionPageContext[],
   tasks: SessionTask[],
-  sessionName: string
+  sessionName: string,
+  detectedDomains: TeacherNotesDomainKey[],
+  evidenceText = ""
 ): string[] {
   const points: string[] = [];
+  const lowerEvidence = evidenceText.toLowerCase();
+
+  if (detectedDomains.includes("demo_orientation")) {
+    points.push("Explain what Nexgen Zippy can do and how the session connects to later build work.");
+    if (
+      /\bbattery\b|\bvideo streaming\b|\bcamera\b|\bcontrol\b|\bmotor\b|\bcommunication\b/.test(
+        lowerEvidence
+      )
+    ) {
+      points.push(
+        "Identify the systems that power Zippy, control it, move it, and communicate or stream information during the demo."
+      );
+    }
+  }
+  if (detectedDomains.includes("software_setup")) {
+    points.push("Set up the required software and confirm it is ready for later sessions.");
+  }
+  if (detectedDomains.includes("cad_3d")) {
+    points.push("Customise Zippy in Tinkercad while working within the available chassis space.");
+    points.push("Test design decisions against fit, clearance, and printability before treating the model as finished.");
+    if (/\bextrude\b|\bgroup\b|\bfile format\b|\bbasic shape\b/.test(lowerEvidence)) {
+      points.push(
+        "Use core Tinkercad tools such as basic shapes, grouping, and extrusion to build a printable customisation."
+      );
+    }
+  }
+  if (detectedDomains.includes("soldering")) {
+    points.push("Identify the soldering quality checks that matter before powering the robot or board.");
+  }
+  if (detectedDomains.includes("wiring_electronics")) {
+    points.push("Verify key wiring paths and explain how the circuit should be checked before testing.");
+  }
+  if (detectedDomains.includes("coding_debugging")) {
+    points.push("Use a simple test loop to confirm the software setup or code is working before moving on.");
+  }
+
   const taskSequence = buildTaskSequenceObjective(tasks);
-  if (taskSequence) {
+  if (taskSequence && points.length < 2) {
     points.push(taskSequence);
   }
 
   const introSentence = firstSentence(introPages.map((p) => p.bodyText).join(" "));
-  if (introSentence) {
+  if (introSentence && !isPromotionalObjectiveSentence(introSentence)) {
     points.push(toOutcomeBullet(introSentence));
   }
 
@@ -1119,9 +1467,15 @@ function buildObjectivePoints(
   return dedupe(points).slice(0, 3);
 }
 
+function isPromotionalObjectiveSentence(value: string): boolean {
+  return /\b(dive into|diving into|exciting world|amazing world|fun world|journey into|let'?s explore|in this exciting session|get ready to explore)\b/i.test(
+    value
+  );
+}
+
 function buildTaskSummary(task: SessionTask): string {
   const sources = task.pages.map((page) => page.title).join(", ");
-  return `Outcome for this task: complete the activities in ${sources}.`;
+  return `Complete the activities in ${sources}.`;
 }
 
 function buildTaskPoints(task: SessionTask): string[] {
@@ -1141,7 +1495,8 @@ function buildCommonIssues(
   tasks: SessionTask[],
   fullText: string,
   issueHints: CommonIssue[],
-  sessionName: string
+  sessionName: string,
+  detectedDomains: TeacherNotesDomainKey[] = []
 ): CommonIssue[] {
   const issues: CommonIssue[] = [];
   const lower = fullText.toLowerCase();
@@ -1176,6 +1531,19 @@ function buildCommonIssues(
     issues.push(...buildSolderingIssues());
   }
 
+  if (detectedDomains.includes("demo_orientation")) {
+    issues.push(
+      {
+        issue: "Students remember the exciting feature they saw but cannot explain which subsystem made it possible.",
+        solution: "Pause the demo and ask students to name the exact part or system responsible for that behaviour before moving on."
+      },
+      {
+        issue: "Students mix up power, control, movement, and communication when describing how Zippy works.",
+        solution: "Have students sort one observed feature into the correct system bucket, then justify why it belongs there."
+      }
+    );
+  }
+
   issues.push(...issueHints);
 
   if (issues.length < 3 && tasks.length > 0) {
@@ -1198,9 +1566,10 @@ function buildCommonIssues(
 function buildAgentCommonIssues(
   tasks: SessionTask[],
   fullText: string,
-  sessionName: string
+  sessionName: string,
+  detectedDomains: TeacherNotesDomainKey[]
 ): CommonIssue[] {
-  const issues = buildCommonIssues(tasks, fullText, [], sessionName);
+  const issues = buildCommonIssues(tasks, fullText, [], sessionName, detectedDomains);
   const lower = fullText.toLowerCase();
 
   if (/\b(tinkercad|3d|model|modelling|design|print)\b/.test(lower)) {
@@ -1223,21 +1592,15 @@ function buildAgentCommonIssues(
 
 function buildCourseInsights(
   sessionName: string,
-  modulePages: SessionPageContext[],
-  coursePages: CoursePageContext[]
+  moduleText: string,
+  detectedDomains: TeacherNotesDomainKey[]
 ): CourseInsight {
-  const moduleText = modulePages.map((page) => page.bodyText).join("\n");
-  const courseText = coursePages.map((page) => page.bodyText).join("\n");
-  const combinedText = `${moduleText}\n${courseText}`;
-  const isSoldering = isSolderingContext(sessionName, combinedText);
-
-  const highlightAreas = COURSE_HIGHLIGHT_SIGNALS
-    .filter((signal) => {
-      const moduleMatch = signal.pattern.test(moduleText);
-      const recurringCourseMatch = countModulesWithPattern(coursePages, signal.pattern) >= 2;
-      return moduleMatch || recurringCourseMatch;
-    })
-    .map((signal) => signal.point);
+  const isSoldering = isSolderingContext(sessionName, moduleText);
+  const highlightAreas = dedupe(
+    detectedDomains.flatMap((domainKey) =>
+      TEACHER_NOTES_CONTRACT.domains[domainKey].strongTeacherMoves.slice(0, 2)
+    )
+  );
 
   if (isSoldering) {
     highlightAreas.push(
@@ -1256,19 +1619,19 @@ function buildCourseInsights(
   }
 
   const issueHints: CommonIssue[] = [];
-  if (countModulesWithPattern(coursePages, /\b(upload|compile|port|board)\b/i) >= 3) {
+  if (/\b(upload|compile|port|board)\b/i.test(moduleText)) {
     issueHints.push({
       issue: "Board/port mismatch appears repeatedly across sessions.",
       solution: "Run a 30-second board-port-cable check at the start of practical work before opening debugging support."
     });
   }
-  if (countModulesWithPattern(coursePages, /\b(wiring|pin|connection)\b/i) >= 3) {
+  if (/\b(wiring|pin|connection)\b/i.test(moduleText)) {
     issueHints.push({
       issue: "Wiring mistakes recur across multiple sessions.",
       solution: "Require students to annotate each verified connection and get a peer check before upload."
     });
   }
-  if (countModulesWithPattern(coursePages, /\b(save|checkpoint|version)\b/i) >= 2) {
+  if (/\b(save|checkpoint|version)\b/i.test(moduleText)) {
     issueHints.push({
       issue: "Students lose working versions after experimentation.",
       solution: "Mandate named checkpoints after each passing milestone before extension changes."
@@ -1279,16 +1642,6 @@ function buildCourseInsights(
     highlightAreas: dedupe(highlightAreas).slice(0, 5),
     issueHints: dedupeIssues(issueHints)
   };
-}
-
-function countModulesWithPattern(coursePages: CoursePageContext[], pattern: RegExp): number {
-  const matchedModules = new Set<number>();
-  for (const page of coursePages) {
-    if (pattern.test(page.bodyText)) {
-      matchedModules.add(page.moduleId);
-    }
-  }
-  return matchedModules.size;
 }
 
 function isSolderingContext(sessionName: string, text: string): boolean {
@@ -1406,14 +1759,6 @@ function normalizeLoose(input: string): string {
   return input.replace(SPACE_RE, " ").trim().toLowerCase();
 }
 
-function normalizeTaskReference(input: string): string {
-  return input
-    .replace(/[^a-z0-9]+/gi, " ")
-    .replace(SPACE_RE, " ")
-    .trim()
-    .toLowerCase();
-}
-
 function extractContextKeywords(parts: string[], max: number): string[] {
   const counts = new Map<string, number>();
   for (const part of parts) {
@@ -1456,7 +1801,9 @@ function buildTaskSequenceObjective(tasks: SessionTask[]): string | undefined {
   return `Complete the session task sequence: ${tasks.map((task) => task.title).join(", ")}.`;
 }
 
-function buildTaskDifferentiation(task: SessionTask): { beginner: string; extension: string } {
+function buildTaskDifferentiation(
+  task: SessionTask
+): { beginner?: string; extension?: string } | undefined {
   const context = `${task.title} ${task.pages.map((p) => p.title).join(" ")} ${task.pages.map((p) => p.bodyText).join(" ")}`.toLowerCase();
   const titleContext = `${task.title} ${task.pages.map((p) => p.title).join(" ")}`.toLowerCase();
 
@@ -1511,12 +1858,7 @@ function buildTaskDifferentiation(task: SessionTask): { beginner: string; extens
     };
   }
 
-  return {
-    beginner:
-      "Make one small tweak to the working example (text, delay, or one variable) and verify the result.",
-    extension:
-      "Add one extra feature of your choice and explain what changed in your code or wiring."
-  };
+  return undefined;
 }
 
 function dedupeIssues(values: CommonIssue[]): CommonIssue[] {
@@ -1532,6 +1874,27 @@ function dedupeIssues(values: CommonIssue[]): CommonIssue[] {
     out.push({ issue, solution });
   }
   return out;
+}
+
+function dedupeTeacherMoves(
+  values: Array<{ issue: string; teacherMove: string }>
+): Array<{ issue: string; teacherMove: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ issue: string; teacherMove: string }> = [];
+  for (const value of values) {
+    const issue = value.issue.replace(SPACE_RE, " ").trim();
+    const teacherMove = value.teacherMove.replace(SPACE_RE, " ").trim();
+    if (!issue || !teacherMove) continue;
+    const key = issue.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ issue, teacherMove });
+  }
+  return out;
+}
+
+function dedupeDomainKeys(values: TeacherNotesDomainKey[]): TeacherNotesDomainKey[] {
+  return Array.from(new Set(values));
 }
 
 function firstSentence(text: string): string | undefined {

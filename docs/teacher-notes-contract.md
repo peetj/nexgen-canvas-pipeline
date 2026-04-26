@@ -379,6 +379,220 @@ These should become code-level validation checks.
 - early-intervention checkpoints
 - specific differentiation that preserves task purpose
 
+## Domain Guidance
+
+This remains one global contract.
+
+We do NOT want separate contract files per session type.
+
+Instead, we want this file to carry domain-specific guidance that helps the runtime layer:
+
+- validate whether output matches the real session type
+- steer prompts toward the right teacher moves
+- reject cross-domain contamination
+- accumulate better examples over time
+
+The runtime should treat the following subsections as guidance and evidence standards, not as copyable output.
+
+### Skillset Examples
+
+This section should grow over time.
+
+Initial domain skeleton:
+
+#### Demo / Orientation
+
+Good notes usually focus on:
+
+- where students lose the thread of what the robot or project is actually doing
+- which part of the demo should become interactive rather than passive watching
+- what to explicitly point out so later sessions make sense
+
+#### Software Setup / Installation
+
+Good notes usually focus on:
+
+- login friction
+- board and port selection
+- install order
+- whether students can open and test the tool successfully before moving on
+
+#### 3D Design / CAD
+
+Good notes usually focus on:
+
+- fit to chassis or usable space
+- clearances
+- scale
+- attachment points
+- printability
+- design purpose vs decoration
+
+#### Soldering
+
+Good notes usually focus on:
+
+- joint quality
+- polarity
+- bridges
+- continuity checks
+- heat discipline
+- safety and bench workflow
+
+#### Wiring / Electronics
+
+Good notes usually focus on:
+
+- pin mapping
+- reading diagrams correctly
+- tracing one connection at a time
+- power and ground mistakes
+- checking before power-on
+
+#### Coding / Debugging
+
+Good notes usually focus on:
+
+- one-change-at-a-time testing
+- visible debug loops
+- verifying inputs/outputs
+- matching code assumptions to wiring reality
+- spotting whether students are guessing vs diagnosing
+
+#### Mechanical Build / Assembly
+
+Good notes usually focus on:
+
+- orientation of parts
+- build sequence
+- fastening and strain relief
+- alignment
+- whether a rushed step creates hidden later problems
+
+#### Theory / Concepts
+
+Good notes usually focus on:
+
+- the one or two ideas students must actually understand
+- misconceptions that will later break practical work
+- short checks that reveal whether understanding is real or memorised
+
+### Failure Patterns By Domain
+
+This section should capture the patterns teachers repeatedly see.
+
+Initial skeleton:
+
+#### Demo / Orientation
+
+- Students watch passively and cannot explain what they just saw.
+- Students remember the exciting feature but miss the underlying system or purpose.
+
+#### Software Setup / Installation
+
+- Students say the software is installed but cannot actually open or test it.
+- Students get stuck on board/port/account setup and wait too long before asking.
+
+#### 3D Design / CAD
+
+- Students design by eye rather than by fit or measurement.
+- Students add decorative features that reduce printability or function.
+- Students ignore clearances and attachment logic.
+
+#### Soldering
+
+- Students produce dull or weak joints and think they are done.
+- Students miss polarity or bridge errors until much later.
+- Students skip continuity checks and only discover faults at power-on.
+
+#### Wiring / Electronics
+
+- Students misread the diagram and shift one or more wires.
+- Students cannot systematically verify a circuit path.
+- Students power the wrong rail or confuse signal and power pins.
+
+#### Coding / Debugging
+
+- Students change several things at once and lose the cause of the bug.
+- Students read code without testing assumptions against outputs.
+- Students ask for fixes before isolating the fault.
+
+#### Mechanical Build / Assembly
+
+- Students rush an early step and create alignment problems later.
+- Students force-fit parts instead of checking orientation.
+
+#### Theory / Concepts
+
+- Students can repeat the term but cannot apply the idea.
+- Students carry a misconception into the practical task without noticing.
+
+### Strong Teacher Moves By Domain
+
+This section should describe high-value teacher interventions that save time without taking over.
+
+Initial skeleton:
+
+#### Demo / Orientation
+
+- Pause and ask a student to predict what the robot or system will do next.
+- Turn one part of the demo into a student-controlled check rather than a teacher-only showcase.
+
+#### Software Setup / Installation
+
+- Run a quick success check before moving on: software open, board selected, port visible, first test complete.
+- Use a short checklist before deeper troubleshooting.
+
+#### 3D Design / CAD
+
+- Ask students to point to the exact chassis space, clearance, or fixing point before approving the idea.
+- Stop decorative drift by asking what the change improves: fit, function, attachment, or appearance.
+
+#### Soldering
+
+- Inspect joints before power-on.
+- Ask students to justify polarity and then verify continuity before moving forward.
+
+#### Wiring / Electronics
+
+- Make students trace each connection aloud against the diagram one at a time.
+- Verify power, ground, and signal separately instead of treating the wiring as one blob.
+
+#### Coding / Debugging
+
+- Force one change, one test, one explanation.
+- Ask what evidence would prove the bug is in code, wiring, or hardware.
+
+#### Mechanical Build / Assembly
+
+- Stop the build when alignment looks wrong and re-check orientation before tightening or fixing parts permanently.
+
+#### Theory / Concepts
+
+- Use one short apply-it-now question to reveal whether the concept will transfer into the build.
+
+### Common Generic Output To Reject
+
+The runtime should flag or reject lines like these unless there is extremely strong session evidence:
+
+- Encourage independence.
+- Be supportive.
+- Students should try their best.
+- Check in with students regularly.
+- Let students be creative.
+- Support students if they get stuck.
+- Help students troubleshoot.
+- Discuss ideas as a class.
+- Complete the task pages.
+- Make sure students understand the content.
+
+It should also reject cross-domain leakage, for example:
+
+- soldering checks in a pure 3D design session
+- printability advice in a pure software setup session
+- board/port troubleshooting in a theory-only session
+- CAD/chassis-fit advice in a demo or install-only session unless the session evidence clearly supports it
+
 ## Example Output Shape
 
 This is the intended internal shape, regardless of how the markdown is authored.

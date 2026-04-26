@@ -1,3 +1,8 @@
+import {
+  buildTeacherNotesPromptGuidance,
+  type TeacherNotesDomainKey
+} from "../../../apps/cli/src/session/teacherNotesContract.ts";
+
 type TeacherNotesTaskContext = {
   title: string;
   pageTitles?: string[];
@@ -6,7 +11,6 @@ type TeacherNotesTaskContext = {
   reinforceHints?: string[];
   beginnerHint?: string;
   extensionHint?: string;
-  reviewNotes?: string;
 };
 
 type TeacherNotesRequest = {
@@ -15,9 +19,7 @@ type TeacherNotesRequest = {
   sessionOverview?: string;
   modulePageTitles?: string[];
   contextKeywords?: string[];
-  reviewNotes?: string;
-  currentDraft?: unknown;
-  reviewCommonIssues?: string[];
+  detectedDomains?: TeacherNotesDomainKey[];
   objectiveHints?: string[];
   softwareHints?: string[];
   hardwareHints?: string[];
@@ -144,72 +146,104 @@ function sanitizeTasks(
   return out;
 }
 
+function mergeFallbackLines(primary: string[], fallback: string[], min: number, max: number): string[] {
+  const out = [...primary];
+  const seen = new Set(out.map((item) => item.toLowerCase()));
+  for (const item of fallback) {
+    const key = item.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+    if (out.length >= max) break;
+  }
+  return out.slice(0, Math.max(min, Math.min(max, out.length)));
+}
+
+function mergeFallbackIssues(
+  primary: Array<{ issue: string; teacherMove: string }>,
+  fallback: Array<{ issue: string; teacherMove: string }>,
+  min: number,
+  max: number
+): Array<{ issue: string; teacherMove: string }> {
+  const out = [...primary];
+  const seen = new Set(out.map((item) => item.issue.toLowerCase()));
+  for (const item of fallback) {
+    const key = item.issue.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+    if (out.length >= max) break;
+  }
+  return out.slice(0, Math.max(min, Math.min(max, out.length)));
+}
+
 function buildSystemPrompt(): string {
   return [
-    "You write teacher notes for STEM practical sessions.",
-    "Audience: busy classroom teachers who need high-leverage, concrete advice.",
+    "You write canonical Teacher Notes pages for STEM project sessions.",
+    "Audience: busy classroom teachers who need sharp, useful notes before and during the lesson.",
     "Primary question: how can the teacher maximise help to students to build an effective project?",
-    "Use the session structure and task sequence to identify where students stall, what the teacher should inspect, and what short intervention will unblock progress.",
-    "Golden nuggets are concise, high-value teacher insights that prevent wasted time or reveal a hidden misconception.",
+    "The page structure is fixed. You are filling sections, not inventing a new format.",
+    "Each section has a specific meaning.",
+    "Main Session Objective: 2-3 bullets only, student-facing only, each beginning with 'Students will' or 'Students can'. No teacher advice here.",
+    "Teacher Focus: one sentence immediately after the objectives. It should capture the single highest-leverage thing the teacher should watch, inspect, or listen for in this session.",
+    "Components & Software Required: include only items clearly grounded in the supplied context. If hardware is not genuinely needed, return an empty hardware array.",
+    "Teacher Highlight Areas: 2-5 concrete teacher watch-fors or intervention checkpoints. These should be worth underlining before class begins.",
+    "Task-by-Task Guidance: for each task, give an outcome, teacher reinforcement points, rare optional golden nuggets, and optional differentiation only when it is genuinely useful for that task.",
+    "Most Common Issues: observable student failure patterns or misconceptions paired with the fastest useful teacher move.",
+    "Golden nuggets should be rare, specific, and genuinely high-value. If you do not have one, return an empty array.",
+    "Differentiation is optional. Do not force it into every task.",
     "Prefer observable warning signs, preventative checks, and practical teacher moves over generic pedagogy.",
-    "Do not copy source notes verbatim.",
-    "Do not add filler, motivational language, or broad advice unless it is anchored to the actual task context.",
-    "A strong line should sound obviously tied to this session and would need editing before reuse in another session.",
-    "Only mention software, hardware, teacher highlights, or issues that are grounded in the supplied context.",
-    "If a category is not clearly supported by the supplied context, return an empty array rather than guessing.",
-    "Do not import patterns from other sessions unless they are explicitly present in the supplied context.",
-    "Use the supplied contextKeywords and page titles as anchors. If you cannot tie a line to those anchors, omit it.",
-    "It is better to return fewer strong items than pad the response with generic advice.",
-    "Avoid low-value administrative reminders such as opening the correct link or class unless account access is clearly a major blocker in the source context.",
-    "Teacher focus should be the single highest-leverage thing the teacher should inspect or listen for during the session.",
-    "Highlight areas should feel like the 2-5 things a teacher would underline before class begins.",
-    "Golden nuggets should be sharp teacher observations, checks, or prompts that prevent wasted student time.",
-    "When reviewNotes are supplied, treat them as high-priority revision instructions for the currentDraft while staying faithful to the session evidence.",
-    "If reviewNotes and currentDraft are present, revise the currentDraft rather than starting from scratch.",
-    "Preserve any strong currentDraft content that does not conflict with reviewNotes.",
-    "Review notes are editorial comments, not final page copy.",
-    "Do not repeat review notes verbatim unless a short phrase is already polished final wording.",
-    "Convert review notes into polished teacher-facing lines grounded in the session, not mechanical paraphrases.",
-    "Never output meta commentary such as 'the wording is not correct', 'the first point is fine', or section labels.",
-    "If a reviewer gives rough issue labels like 'wrong measurements', expand them into polished classroom-relevant issue statements.",
-    "If a reviewer says a task is hard, turn that into a practical teacher move or expectation-setting note rather than a blunt warning.",
-    "Implement concrete requested changes such as missing items, wording direction, or emphasis shifts without copying the review note structure.",
-    "reviewCommonIssues are reviewer-supplied issue ideas and should be rewritten into polished issue statements when they fit the session evidence.",
-    "taskContexts[].reviewNotes are task-specific revision notes and should inform that task's outcome, reinforce points, or golden nuggets without being quoted directly.",
+    "Do not write filler, motivational language, or broad advice that could fit any session.",
+    "Do not copy page summaries verbatim.",
+    "A strong line should sound clearly tied to this session and would need editing before reuse in another session.",
+    "Use only the supplied session evidence, page titles, task order, summaries, hints, and context keywords.",
+    "Treat contractPromptRules, domainGuidance, and genericRejects in the supplied context as binding instructions.",
+    "If a category is weakly supported, return fewer items instead of padding.",
+    "Reject generic lines like 'encourage independence' unless they are anchored to a concrete classroom move in this session.",
     "Use Australian spelling where natural.",
-    "Return ONLY valid JSON with keys: sessionObjective, teacherFocus, software, hardware, highlightAreas, tasks, commonIssues, troubleshootingClose.",
-    "sessionObjective: array of 2-3 short student outcome statements.",
-    "Every sessionObjective item must begin with 'Students will' or 'Students can'.",
-    "teacherFocus: one short sentence.",
-    "software: array of 0-6 items.",
-    "hardware: array of 0-10 items.",
-    "highlightAreas: array of 2-5 short actionable bullets.",
-    "tasks: array matching the task order where possible. Each task object must use keys title, outcome, reinforce, goldenNuggets, beginner, extension.",
+    "Return ONLY valid JSON with keys: sessionObjective, teacherFocus, software, hardware, highlightAreas, tasks, commonIssues.",
+    "sessionObjective: array of 2-3 strings.",
+    "teacherFocus: one string.",
+    "software: array of 0-6 strings.",
+    "hardware: array of 0-10 strings.",
+    "highlightAreas: array of 2-5 strings.",
+    "tasks: array matching the supplied task order where possible.",
     "tasks[].outcome: one short sentence.",
-    "tasks[].reinforce: array of 2-5 short points the teacher should reinforce.",
-    "tasks[].goldenNuggets: array of 1-3 short, specific teacher insights.",
-    "tasks[].beginner and tasks[].extension: one short sentence each.",
+    "tasks[].reinforce: array of 2-5 concrete teacher reinforcement points.",
+    "tasks[].goldenNuggets: array of 0-3 short, specific teacher insights.",
+    "tasks[].beginner and tasks[].extension: optional short strings only when the task genuinely supports differentiation.",
     "commonIssues: array of 2-6 objects with keys issue and teacherMove.",
     "commonIssues[].issue: an observable failure pattern or misconception.",
-    "commonIssues[].teacherMove: the fastest teacher check or intervention.",
-    "troubleshootingClose: one short sentence.",
+    "commonIssues[].teacherMove: the fastest useful teacher intervention or check.",
     "No markdown, no code fences, no extra text."
   ].join(" ");
 }
 
 function buildUserPrompt(payload: TeacherNotesRequest): string {
+  const promptGuidance = buildTeacherNotesPromptGuidance(
+    toStringArray(payload.detectedDomains, 8).filter(
+      (value): value is TeacherNotesDomainKey => value in {
+        demo_orientation: true,
+        software_setup: true,
+        cad_3d: true,
+        soldering: true,
+        wiring_electronics: true,
+        coding_debugging: true,
+        mechanical_build: true,
+        theory_concepts: true
+      }
+    )
+  );
   const context = {
     sessionName: payload.sessionName,
     pageTitle: toNonEmptyString(payload.pageTitle),
     sessionOverview: toNonEmptyString(payload.sessionOverview),
     modulePageTitles: toStringArray(payload.modulePageTitles, 12),
     contextKeywords: toStringArray(payload.contextKeywords, 24),
-    reviewNotes: toNonEmptyString(payload.reviewNotes),
-    currentDraft:
-      payload.currentDraft && typeof payload.currentDraft === "object"
-        ? payload.currentDraft
-        : undefined,
-    reviewCommonIssues: toStringArray(payload.reviewCommonIssues, 8),
+    detectedDomains: promptGuidance.domains,
+    contractPromptRules: promptGuidance.globalRules,
+    domainGuidance: promptGuidance.domainRules,
+    genericRejects: promptGuidance.genericRejects,
     objectiveHints: toStringArray(payload.objectiveHints, 4),
     softwareHints: toStringArray(payload.softwareHints, 8),
     hardwareHints: toStringArray(payload.hardwareHints, 10),
@@ -223,15 +257,14 @@ function buildUserPrompt(payload: TeacherNotesRequest): string {
           pageSummaries: toStringArray(task.pageSummaries, 6),
           reinforceHints: toStringArray(task.reinforceHints, 6),
           beginnerHint: toNonEmptyString(task.beginnerHint),
-          extensionHint: toNonEmptyString(task.extensionHint),
-          reviewNotes: toNonEmptyString(task.reviewNotes)
+          extensionHint: toNonEmptyString(task.extensionHint)
         }))
       : []
   };
 
   return [
-    "Use the following source context to write tight teacher notes that are worth reading.",
-    "Select the details that help a teacher make fast, high-value interventions in class.",
+    "Write tight, teacher-facing notes from the following session evidence.",
+    "Stay faithful to the fixed structure and section meanings.",
     "Source context JSON:",
     JSON.stringify(context, null, 2)
   ].join("\n");
@@ -334,7 +367,6 @@ export default {
     const highlightAreas = toStringArray(parsed.highlightAreas, 5);
     const tasks = sanitizeTasks(parsed.tasks, fallbackTaskTitles, 8);
     const commonIssues = sanitizeCommonIssues(parsed.commonIssues, 8);
-    const troubleshootingClose = toNonEmptyString(parsed.troubleshootingClose);
 
     if (
       sessionObjective.length === 0 &&
@@ -346,15 +378,18 @@ export default {
       return errorResponse("Model returned no usable teacher notes content", 502);
     }
 
+    const resolvedObjectives = mergeFallbackLines(sessionObjective, fallbackObjectives, 2, 3);
+    const resolvedHighlights = mergeFallbackLines(highlightAreas, fallbackHighlights, 2, 5);
+    const resolvedIssues = mergeFallbackIssues(commonIssues, fallbackIssues, 2, 6);
+
     return jsonResponse({
-      sessionObjective: sessionObjective.length > 0 ? sessionObjective : fallbackObjectives,
-      teacherFocus,
+      sessionObjective: resolvedObjectives,
+      teacherFocus: teacherFocus ?? resolvedHighlights[0],
       software: software.length > 0 ? software : fallbackSoftware,
       hardware: hardware.length > 0 ? hardware : fallbackHardware,
-      highlightAreas: highlightAreas.length > 0 ? highlightAreas : fallbackHighlights,
+      highlightAreas: resolvedHighlights,
       tasks,
-      commonIssues: commonIssues.length > 0 ? commonIssues : fallbackIssues,
-      troubleshootingClose,
+      commonIssues: resolvedIssues,
       source: {
         sessionName,
         generatedAtUtc: new Date().toISOString(),
