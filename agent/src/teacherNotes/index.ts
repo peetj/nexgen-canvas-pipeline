@@ -13,14 +13,21 @@ type TeacherNotesTaskContext = {
   extensionHint?: string;
 };
 
+type TeacherNotesSourcePage = {
+  title?: string;
+  bodyText?: string;
+};
+
 type TeacherNotesRequest = {
   sessionName: string;
   pageTitle?: string;
+  sourcePages?: TeacherNotesSourcePage[];
+  quizTitle?: string;
+  quizQuestionStems?: string[];
   sessionOverview?: string;
   modulePageTitles?: string[];
   contextKeywords?: string[];
   detectedDomains?: TeacherNotesDomainKey[];
-  objectiveHints?: string[];
   softwareHints?: string[];
   hardwareHints?: string[];
   highlightAreaHints?: string[];
@@ -97,6 +104,24 @@ function sanitizeCommonIssues(
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ issue, teacherMove });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function sanitizeSourcePages(value: unknown, max: number): Array<{ title?: string; bodyText?: string }> {
+  if (!Array.isArray(value)) return [];
+  const out: Array<{ title?: string; bodyText?: string }> = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) continue;
+    const record = item as Record<string, unknown>;
+    const title = toNonEmptyString(record.title);
+    const bodyText = toNonEmptyString(record.bodyText);
+    if (!title && !bodyText) continue;
+    out.push({
+      title,
+      bodyText: bodyText ? bodyText.slice(0, 8000) : undefined
+    });
     if (out.length >= max) break;
   }
   return out;
@@ -196,7 +221,8 @@ function buildSystemPrompt(): string {
     "Do not write filler, motivational language, or broad advice that could fit any session.",
     "Do not copy page summaries verbatim.",
     "A strong line should sound clearly tied to this session and would need editing before reuse in another session.",
-    "Use only the supplied session evidence, page titles, task order, summaries, hints, and context keywords.",
+    "Evaluate the supplied sourcePages and quizQuestionStems as the source of truth for what is actually in the session.",
+    "Use task titles, task order, summaries, hints, and context keywords only as navigation aids, not as objectives.",
     "Treat contractPromptRules, domainGuidance, and genericRejects in the supplied context as binding instructions.",
     "If a category is weakly supported, return fewer items instead of padding.",
     "Reject generic lines like 'encourage independence' unless they are anchored to a concrete classroom move in this session.",
@@ -237,6 +263,9 @@ function buildUserPrompt(payload: TeacherNotesRequest): string {
   const context = {
     sessionName: payload.sessionName,
     pageTitle: toNonEmptyString(payload.pageTitle),
+    sourcePages: sanitizeSourcePages(payload.sourcePages, 10),
+    quizTitle: toNonEmptyString(payload.quizTitle),
+    quizQuestionStems: toStringArray(payload.quizQuestionStems, 12),
     sessionOverview: toNonEmptyString(payload.sessionOverview),
     modulePageTitles: toStringArray(payload.modulePageTitles, 12),
     contextKeywords: toStringArray(payload.contextKeywords, 24),
@@ -244,7 +273,6 @@ function buildUserPrompt(payload: TeacherNotesRequest): string {
     contractPromptRules: promptGuidance.globalRules,
     domainGuidance: promptGuidance.domainRules,
     genericRejects: promptGuidance.genericRejects,
-    objectiveHints: toStringArray(payload.objectiveHints, 4),
     softwareHints: toStringArray(payload.softwareHints, 8),
     hardwareHints: toStringArray(payload.hardwareHints, 10),
     highlightAreaHints: toStringArray(payload.highlightAreaHints, 6),
@@ -291,7 +319,7 @@ async function callOpenAi(payload: TeacherNotesRequest, env: Env): Promise<strin
       ],
       response_format: { type: "json_object" },
       temperature: 0,
-      max_tokens: 1600
+      max_tokens: 2200
     })
   });
 
@@ -354,7 +382,6 @@ export default {
           .map((task) => toNonEmptyString(task.title))
           .filter((title): title is string => Boolean(title))
       : [];
-    const fallbackObjectives = toStringArray(payload.objectiveHints, 3);
     const fallbackSoftware = toStringArray(payload.softwareHints, 8);
     const fallbackHardware = toStringArray(payload.hardwareHints, 10);
     const fallbackHighlights = toStringArray(payload.highlightAreaHints, 5);
@@ -378,12 +405,11 @@ export default {
       return errorResponse("Model returned no usable teacher notes content", 502);
     }
 
-    const resolvedObjectives = mergeFallbackLines(sessionObjective, fallbackObjectives, 2, 3);
     const resolvedHighlights = mergeFallbackLines(highlightAreas, fallbackHighlights, 2, 5);
     const resolvedIssues = mergeFallbackIssues(commonIssues, fallbackIssues, 2, 6);
 
     return jsonResponse({
-      sessionObjective: resolvedObjectives,
+      sessionObjective,
       teacherFocus: teacherFocus ?? resolvedHighlights[0],
       software: software.length > 0 ? software : fallbackSoftware,
       hardware: hardware.length > 0 ? hardware : fallbackHardware,

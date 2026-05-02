@@ -11,14 +11,21 @@ export type TeacherNotesAgentTaskInput = {
   extensionHint?: string;
 };
 
+export type TeacherNotesAgentSourcePageInput = {
+  title: string;
+  bodyText: string;
+};
+
 export type TeacherNotesAgentInput = {
   sessionName: string;
   pageTitle: string;
+  sourcePages?: TeacherNotesAgentSourcePageInput[];
+  quizTitle?: string;
+  quizQuestionStems?: string[];
   sessionOverview?: string;
   modulePageTitles?: string[];
   contextKeywords?: string[];
   detectedDomains?: TeacherNotesDomainKey[];
-  objectiveHints?: string[];
   softwareHints?: string[];
   hardwareHints?: string[];
   highlightAreaHints?: string[];
@@ -132,11 +139,13 @@ export async function generateTeacherNotesFromAgent(
     body: JSON.stringify({
       sessionName: input.sessionName,
       pageTitle: input.pageTitle,
+      sourcePages: input.sourcePages ?? [],
+      quizTitle: input.quizTitle,
+      quizQuestionStems: input.quizQuestionStems ?? [],
       sessionOverview: input.sessionOverview,
       modulePageTitles: input.modulePageTitles ?? [],
       contextKeywords: input.contextKeywords ?? [],
       detectedDomains: input.detectedDomains ?? [],
-      objectiveHints: input.objectiveHints ?? [],
       softwareHints: input.softwareHints ?? [],
       hardwareHints: input.hardwareHints ?? [],
       highlightAreaHints: input.highlightAreaHints ?? [],

@@ -14,7 +14,10 @@ import { generateQuizFromAgent } from "./agent/quiz/quizAgentClient.js";
 import type { QuizDifficulty } from "./agent/quiz/quizAgentClient.js";
 import { generateTodayIntroFromAgent } from "./agent/sessionIntro/todayIntroAgentClient.js";
 import { buildSessionHeaderTitles, ensureModuleByName, resolveModuleByName } from "./session/sessionHeaders.js";
-import { buildTeacherNotesForSession } from "./session/teacherNotes.js";
+import {
+  buildTeacherNotesForSession,
+  inspectTeacherNotesSourceForSession
+} from "./session/teacherNotes.js";
 import {
   buildTaskASection,
   buildTaskBSection,
@@ -4941,6 +4944,7 @@ program.command("teacher-notes")
   .requiredOption("--page-title <title>", "Canvas page title for the generated Teacher Notes")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
   .option("--dry-run", "Generate and preview without uploading", false)
+  .option("--inspect-input", "Inspect the derived Teacher Notes source context without generating", false)
   .action(async (opts) => {
     const courseId = Number(opts.courseId);
     if (!Number.isFinite(courseId)) {
@@ -4959,6 +4963,17 @@ program.command("teacher-notes")
     }
 
     const client = new CanvasClient();
+    if (opts.inspectInput) {
+      const inspection = await inspectTeacherNotesSourceForSession(
+        client,
+        courseId,
+        sessionName,
+        rawPageTitle
+      );
+      console.log(JSON.stringify(inspection, null, 2));
+      return;
+    }
+
     const archivePage = async (pageUrl: string): Promise<string | undefined> => {
       const current = await client.getPage(courseId, pageUrl);
       const stamp = new Date().toISOString().replace(/[.:]/g, "-");

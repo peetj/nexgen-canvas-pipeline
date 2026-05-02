@@ -58,6 +58,30 @@ export type TeacherNotesBuildResult = {
   generationWarning?: string;
 };
 
+export type TeacherNotesSourceInspection = {
+  module: CanvasModuleSummary;
+  moduleItems: Array<{
+    position: number;
+    type: string;
+    title: string;
+  }>;
+  sourcePages: Array<{
+    position: number;
+    title: string;
+    pageUrl: string;
+    characterCount: number;
+    excerpt?: string;
+  }>;
+  introPages: string[];
+  quiz: {
+    title?: string;
+    questionCount: number;
+    questionStems: string[];
+  };
+  detectedDomains: TeacherNotesDomainKey[];
+  agentInput: TeacherNotesAgentInput;
+};
+
 const TASK_HEADER_RE = /^session\s+\d+\s*:\s*task\s+[a-z0-9]/i;
 const SPACE_RE = /\s+/g;
 const CONTEXT_TOKEN_RE = /\b(?:[a-z][a-z0-9-]{2,}|3d)\b/gi;
@@ -221,6 +245,78 @@ export async function buildTeacherNotesForSession(
   };
 }
 
+export async function inspectTeacherNotesSourceForSession(
+  client: CanvasClient,
+  courseId: number,
+  sessionName: string,
+  pageTitle: string
+): Promise<TeacherNotesSourceInspection> {
+  const module = await resolveModuleByName(client, courseId, sessionName);
+  const moduleItems = await client.listModuleItems(courseId, module.id);
+  const sortedItems = [...moduleItems].sort((a, b) => a.position - b.position);
+
+  const pageCache = new Map<string, { bodyHtml: string; bodyText: string }>();
+  const modulePages = await collectModulePages(
+    client,
+    courseId,
+    sortedItems,
+    pageTitle,
+    pageCache
+  );
+  const quizEvidence = await collectModuleQuizEvidence(client, courseId, sortedItems);
+  const tasks = resolveTasks(sortedItems, modulePages);
+  const introPages = resolveIntroPages(sortedItems, modulePages);
+  const evidenceText = buildTeacherNotesEvidenceText(modulePages, quizEvidence);
+  const detectedDomains = resolveTeacherNotesDomains(
+    sessionName,
+    pageTitle,
+    introPages,
+    tasks,
+    quizEvidence
+  );
+  const taskContexts = buildTeacherNotesTaskContexts(
+    tasks,
+    sessionName,
+    quizEvidence,
+    detectedDomains
+  );
+  const courseInsight = buildCourseInsights(sessionName, evidenceText, detectedDomains);
+  const agentInput = buildTeacherNotesAgentInput(
+    pageTitle,
+    sessionName,
+    sortedItems,
+    modulePages,
+    courseInsight,
+    detectedDomains,
+    quizEvidence,
+    taskContexts
+  );
+
+  return {
+    module,
+    moduleItems: sortedItems.map((item) => ({
+      position: item.position,
+      type: item.type,
+      title: item.title
+    })),
+    sourcePages: modulePages.map((page) => ({
+      position: page.position,
+      title: page.title,
+      pageUrl: page.pageUrl,
+      characterCount: page.bodyText.length,
+      excerpt: buildPageExcerpt(page.bodyText, 2, 360)
+    })),
+    introPages: introPages.map((page) => page.title),
+    quiz: {
+      title: quizEvidence.title,
+      questionCount: quizEvidence.questionStems.length,
+      questionStems: quizEvidence.questionStems
+    },
+    detectedDomains,
+    agentInput
+  };
+}
+
 function buildTeacherNotesAgentInput(
   pageTitle: string,
   sessionName: string,
@@ -242,15 +338,18 @@ function buildTeacherNotesAgentInput(
   return {
     sessionName,
     pageTitle,
+    sourcePages: modulePages.map((page) => ({
+      title: page.title,
+      bodyText: page.bodyText
+    })),
+    quizTitle: quizEvidence.title,
+    quizQuestionStems: quizEvidence.questionStems,
     sessionOverview:
       buildPageExcerpt(introPages.map((page) => page.bodyText).join(" "), 3, 420) ??
       buildPageExcerpt(fullText, 3, 420),
     modulePageTitles: modulePages.map((page) => page.title),
     contextKeywords,
     detectedDomains,
-    objectiveHints: normalizeStudentObjectives(
-      buildObjectivePoints(introPages, tasks, sessionName, detectedDomains, fullText)
-    ),
     softwareHints: detectComponents(fullText, SOFTWARE_KEYWORDS, []),
     hardwareHints: detectComponents(fullText, HARDWARE_KEYWORDS, []),
     highlightAreaHints: courseInsight.highlightAreas,
@@ -768,9 +867,6 @@ function applyContractFallbacks(
   quizEvidence: SessionQuizEvidence
 ): TeacherNotesAgentOutput {
   const fallbackTasks = buildFallbackTaskOutputs(taskContexts);
-  const fallbackObjectives = normalizeStudentObjectives(
-    buildObjectivePoints(introPages, [], sessionName, detectedDomains, evidenceText)
-  );
   const fallbackIssues = buildAgentCommonIssues([], evidenceText, sessionName, detectedDomains).map((issue) => ({
     issue: issue.issue,
     teacherMove: issue.solution
@@ -778,10 +874,10 @@ function applyContractFallbacks(
 
   return {
     ...content,
-    sessionObjective: dedupe([
-      ...content.sessionObjective,
-      ...fallbackObjectives
-    ]).slice(0, TEACHER_NOTES_CONTRACT.mainSessionObjective.maxEntries),
+    sessionObjective: content.sessionObjective.slice(
+      0,
+      TEACHER_NOTES_CONTRACT.mainSessionObjective.maxEntries
+    ),
     teacherFocus: content.teacherFocus ?? buildTeacherFocusFallback(courseInsight.highlightAreas),
     highlightAreas: dedupe([
       ...content.highlightAreas,
@@ -1412,7 +1508,6 @@ function buildObjectivePoints(
 ): string[] {
   const points: string[] = [];
   const lowerEvidence = evidenceText.toLowerCase();
-
   if (detectedDomains.includes("demo_orientation")) {
     points.push("Explain what Nexgen Zippy can do and how the session connects to later build work.");
     if (
@@ -1572,7 +1667,7 @@ function buildAgentCommonIssues(
   const issues = buildCommonIssues(tasks, fullText, [], sessionName, detectedDomains);
   const lower = fullText.toLowerCase();
 
-  if (/\b(tinkercad|3d|model|modelling|design|print)\b/.test(lower)) {
+  if (/\b(tinkercad|3d|modelling|modeling|3d\s+print(?:ing)?|printability|printable|chassis|overhang|wall thickness)\b/.test(lower)) {
     issues.push({
       issue: "Students create designs that look interesting but will not attach securely to Zippy.",
       solution: "Pause before printing and make students point to the exact contact surfaces, clearances, and fixing points on the model."
@@ -1809,7 +1904,14 @@ function buildTaskDifferentiation(
 
   const hasCustomCharacter = matchesAny(context, [/\bcustom\b/i, /\bcharacter\b/i]);
   const hasKeypad = matchesAny(context, [/\bkeypad\b/i, /\b3x4\b/i, /\bmatrix\b/i]);
-  const has3dDesign = matchesAny(context, [/\btinkercad\b/i, /\b3d\b/i, /\bmodel(?:ling)?\b/i, /\bdesign\b/i, /\bprint\b/i, /\bchassis\b/i]);
+  const has3dDesign = matchesAny(context, [
+    /\btinkercad\b/i,
+    /\b3d\b/i,
+    /\bmodel(?:ling|ing)?\b/i,
+    /\b3d\s+print(?:ing)?\b/i,
+    /\bprint(?:able|ability)\b/i,
+    /\bchassis\b/i
+  ]);
   const isTheory = matchesAny(titleContext, [/\bhow\s+.+\s+work/i, /\btheory\b/i, /\bconcept\b/i]);
   const hasWiringOrLcd = matchesAny(context, [/\bwiring\b/i, /\blcd\b/i]);
 

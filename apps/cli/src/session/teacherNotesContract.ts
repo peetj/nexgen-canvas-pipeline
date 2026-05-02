@@ -125,7 +125,8 @@ const DOMAIN_GUIDANCE: Record<TeacherNotesDomainKey, TeacherNotesDomainGuidance>
       /\bmodel(?:ling)?\b/i,
       /\bprintability\b/i,
       /\bclearance\b/i,
-      /\bprint(?:ing)?\b/i,
+      /\b3d\s+print(?:ing)?\b/i,
+      /\bprint(?:able|ability)\b/i,
       /\boverhang\b/i,
       /\bwall thickness\b/i
     ],

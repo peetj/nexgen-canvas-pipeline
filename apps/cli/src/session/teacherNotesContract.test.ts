@@ -63,6 +63,18 @@ test("detectTeacherNotesDomains keeps 3D routing but ignores task-template theor
   assert.ok(!domains.includes("theory_concepts"));
 });
 
+test("detectTeacherNotesDomains does not treat Serial print output as 3D CAD evidence", () => {
+  const domains = detectTeacherNotesDomains([
+    "Session 03 - The LCD Screen & 3x4 Matrix Keypad",
+    "Students wire the LCD screen from a diagram, upload code, and use Serial Monitor to check which keypad key prints the correct value.",
+    "Create custom LCD characters and display them on the LCD."
+  ]);
+
+  assert.ok(domains.includes("wiring_electronics"));
+  assert.ok(domains.includes("coding_debugging"));
+  assert.ok(!domains.includes("cad_3d"));
+});
+
 test("detectTeacherNotesDomains prefers mechanical build over soldering for assembly-only evidence", () => {
   const domains = detectTeacherNotesDomains([
     "Session 06 - Assembling Zippy",
