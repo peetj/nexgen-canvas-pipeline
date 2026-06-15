@@ -62,7 +62,7 @@ function getOptionalUrl(name: string): string | undefined {
 
 function deriveAgentRouteUrl(
   baseUrl: string | undefined,
-  routePath: "/generate-quiz" | "/today-intro" | "/task-a-content"
+  routePath: "/generate-quiz" | "/today-intro" | "/task-a-content" | "/teacher-notes"
 ): string | undefined {
   if (!baseUrl) return undefined;
   try {
@@ -90,6 +90,10 @@ function deriveAgentRouteUrl(
       u.pathname = `${normalized.slice(0, -"/task-a-content".length)}${routePath}`;
       return u.toString();
     }
+    if (normalized.endsWith("/teacher-notes")) {
+      u.pathname = `${normalized.slice(0, -"/teacher-notes".length)}${routePath}`;
+      return u.toString();
+    }
 
     u.pathname = normalized === "/" ? routePath : `${normalized}${routePath}`;
     return u.toString();
@@ -103,6 +107,7 @@ const canvasAgentApiKey = getOptional("CANVAS_AGENT_API_KEY");
 const legacyQuizAgentUrl = getOptionalUrl("QUIZ_AGENT_URL");
 const legacyTodayIntroAgentUrl = getOptionalUrl("TODAY_INTRO_AGENT_URL");
 const legacyTaskAAgentUrl = getOptionalUrl("TASK_A_AGENT_URL");
+const legacyTeacherNotesAgentUrl = getOptionalUrl("TEACHER_NOTES_AGENT_URL");
 
 const quizAgentUrl =
   deriveAgentRouteUrl(legacyQuizAgentUrl, "/generate-quiz") ??
@@ -127,6 +132,16 @@ const taskAAgentApiKey =
   canvasAgentApiKey ??
   todayIntroAgentApiKey;
 
+const teacherNotesAgentUrl =
+  legacyTeacherNotesAgentUrl ??
+  deriveAgentRouteUrl(canvasAgentUrl, "/teacher-notes") ??
+  deriveAgentRouteUrl(taskAAgentUrl, "/teacher-notes") ??
+  deriveAgentRouteUrl(todayIntroAgentUrl, "/teacher-notes");
+const teacherNotesAgentApiKey =
+  getOptional("TEACHER_NOTES_AGENT_API_KEY") ??
+  canvasAgentApiKey ??
+  taskAAgentApiKey;
+
 const contentStyleNote = getOptionalFirst(["CONTENT_STYLE_NOTE", "CONTENT_STYLES_NOTE"]);
 const contentStyleInfo = getOptionalFirst(["CONTENT_STYLE_INFO", "CONTENT_STYLES_INFO"]);
 const contentStyleWarning = getOptionalFirst(["CONTENT_STYLE_WARNING", "CONTENT_STYLES_WARNING"]);
@@ -145,6 +160,8 @@ export const env = {
   todayIntroAgentApiKey,
   taskAAgentUrl,
   taskAAgentApiKey,
+  teacherNotesAgentUrl,
+  teacherNotesAgentApiKey,
   contentStyles: {
     note: contentStyleNote,
     info: contentStyleInfo,

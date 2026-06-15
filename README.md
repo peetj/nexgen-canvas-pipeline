@@ -11,7 +11,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 ## Setup
 1. Install Node.js 18+.
 2. Copy .env.example to .env and fill values.
-   - Configure `CANVAS_AGENT_URL` (single worker base URL). CLI derives `/generate-quiz`, `/today-intro`, and `/task-a-content`.
+   - Configure `CANVAS_AGENT_URL` (single worker base URL). CLI derives `/generate-quiz`, `/today-intro`, `/task-a-content`, and `/teacher-notes`.
 3. Install deps:
    npm install
 
@@ -24,6 +24,7 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 - `agent/src/quiz`: Cloudflare quiz generator endpoint (`/generate-quiz`)
 - `agent/src/todayIntro`: Cloudflare intro rewrite endpoint for `today-section` (`/today-intro`)
 - `agent/src/taskA`: Cloudflare Task A enrichment endpoint for task pages (`/task-a-content`)
+- `agent/src/teacherNotes`: Cloudflare teacher-notes enrichment endpoint (`/teacher-notes`)
 
 ## Command Summary
 ### Main CLI (`apps/cli/src/cli.ts`)
@@ -222,38 +223,31 @@ Generate teacher notes from existing session content.
 
 Behavior notes:
 - Uses whole-course session content (not just the target session module) to infer recurring teacher watchpoints.
-- Uses a strict heading template from `apps/cli/src/session/teacherNotesTemplate.ts`, including a guaranteed `Most Common Issues` section.
+- Uses a fixed section contract plus template from `docs/teacher-notes-contract.md` and `apps/cli/src/session/teacherNotesTemplate.ts`.
+- Prefers the `teacher-notes` agent route for tight teacher-facing guidance and falls back to the legacy heuristic generator if the route is unavailable.
+- Publishes directly to the live Teacher Notes page and places it under the `Teachers Notes` module subheader with indent.
 
 Options:
 - `--session-name <name>`: Required. Exact Canvas module name for the session.
-- `--page-title <title>`: Required. Base title for teacher notes page.
+- `--page-title <title>`: Required. Live title for the Teacher Notes page.
 - `--course-id <id>`: Canvas course id. Default: `CANVAS_TEST_COURSE_ID` from `.env`.
-- `--draft`: Write/update draft notes page (`<page-title> (Draft)`), keep live module placement unchanged.
 - `--dry-run`: Generate preview only; no Canvas updates.
 
-Live mode behavior (default, when `--draft` is not set):
-- Archives existing target page before overwrite.
-- Creates or updates teacher notes page.
-- Inserts/moves page to top of session module under `Teachers Notes`.
-
-Draft mode behavior:
-- Creates/updates draft page only.
-- Does not archive live page.
-- Does not change live module placement.
+Workflow:
+- The CLI collects the current session pages, extracts structured context, calls the `teacher-notes` agent, validates the response against the runtime contract, renders canonical HTML, then updates or creates the live Canvas page.
+- If a live page already exists, the previous content is archived before overwrite.
+- `--dry-run` shows the generated preview without changing Canvas.
 
 Examples:
 ```bash
-# Draft iteration
-npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft
-
-# Draft preview only
-npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
-
-# Live publish (after draft approval)
+# Live publish
 npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad"
 
+# Preview only
+npx tsx apps/cli/src/cli.ts teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --dry-run
+
 # npm wrapper form
-npm run dev -- teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --draft --dry-run
+npm run dev -- teacher-notes --course-id 21 --session-name "Session 03 - The LCD Screen & 3x4 Matrix Keypad" --page-title "The LCD Screen & 3x4 Matrix Keypad" --dry-run
 ```
 
 ### Command: `task-a-section`

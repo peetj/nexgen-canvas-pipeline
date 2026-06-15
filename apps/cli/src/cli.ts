@@ -14,7 +14,10 @@ import { generateQuizFromAgent } from "./agent/quiz/quizAgentClient.js";
 import type { QuizDifficulty } from "./agent/quiz/quizAgentClient.js";
 import { generateTodayIntroFromAgent } from "./agent/sessionIntro/todayIntroAgentClient.js";
 import { buildSessionHeaderTitles, ensureModuleByName, resolveModuleByName } from "./session/sessionHeaders.js";
-import { buildTeacherNotesForSession } from "./session/teacherNotes.js";
+import {
+  buildTeacherNotesForSession,
+  inspectTeacherNotesSourceForSession
+} from "./session/teacherNotes.js";
 import {
   buildTaskASection,
   buildTaskBSection,
@@ -720,6 +723,17 @@ async function pathExists(filePath: string): Promise<boolean> {
     if (code === "ENOENT") return false;
     throw err;
   }
+}
+
+function findTeacherNotesInsertionPosition(items: CanvasModuleItem[]): number {
+  const sorted = [...items].sort((a, b) => a.position - b.position);
+  const teacherHeader = sorted.find(
+    (item) =>
+      item.type === "SubHeader" &&
+      (normalizeName(item.title) === "teachers notes" || normalizeName(item.title) === "teacher notes")
+  );
+  if (teacherHeader) return teacherHeader.position + 1;
+  return sorted.length === 0 ? 1 : sorted[0].position;
 }
 
 async function resolveOrchestratorContentPath(input: {
@@ -4925,59 +4939,41 @@ program.command("clone-survey")
   });
 
 program.command("teacher-notes")
-  .description("Generate canonical-style Teacher Notes from an existing session module and insert the page at the top.")
+  .description("Generate Teacher Notes from an existing session module and publish them under Teachers Notes.")
   .requiredOption("--session-name <name>", "Exact Canvas module name for the session")
   .requiredOption("--page-title <title>", "Canvas page title for the generated Teacher Notes")
   .option("--course-id <id>", "Canvas course id to use", String(env.canvasTestCourseId))
-  .option("--draft", "Publish/update a draft notes page and leave live module placement unchanged", false)
   .option("--dry-run", "Generate and preview without uploading", false)
+  .option("--inspect-input", "Inspect the derived Teacher Notes source context without generating", false)
   .action(async (opts) => {
     const courseId = Number(opts.courseId);
     if (!Number.isFinite(courseId)) {
       throw new Error("Invalid --course-id. Provide a numeric Canvas course id.");
     }
-
-    const sessionName = String(opts.sessionName);
-    const rawPageTitle = String(opts.pageTitle);
-    const isDraftMode = Boolean(opts.draft);
-    const pageTitle = isDraftMode && !/\(draft\)\s*$/i.test(rawPageTitle)
-      ? `${rawPageTitle} (Draft)`
-      : rawPageTitle;
-    const client = new CanvasClient();
-    const sessionMeta = parseSessionMetadata(sessionName);
-    const filesScaffoldResult = await ensureCanvasSessionFilesFolders({
-      client,
-      courseId,
-      sessionMeta,
-      dryRun: Boolean(opts.dryRun)
-    });
-
-    const built = await buildTeacherNotesForSession(client, courseId, sessionName, pageTitle);
-
-    console.log(`Course: ${courseId}`);
-    console.log(`Session module: ${built.module.name} (${built.module.id})`);
-    console.log(`Mode: ${isDraftMode ? "draft" : "live"}`);
-    console.log(`Source pages: ${built.modulePages.length}`);
-    console.log(`Teacher notes title: ${pageTitle}`);
-    console.log(`Target module position: ${built.insertionPosition}`);
-    if (filesScaffoldResult && (opts.dryRun || filesScaffoldResult.createdPaths.length > 0)) {
-      console.log(
-        `${opts.dryRun ? "Canvas files folders to create" : "Canvas files folders created"}: ` +
-        `${filesScaffoldResult.createdPaths.length}`
-      );
-      for (const folderPath of filesScaffoldResult.createdPaths) {
-        console.log(`+ ${folderPath}`);
-      }
+    const sessionName = String(opts.sessionName).trim();
+    if (!sessionName) {
+      throw new Error("Invalid --session-name. Provide a non-empty Canvas module name.");
+    }
+    const rawPageTitle = String(opts.pageTitle).trim();
+    if (!rawPageTitle) {
+      throw new Error("Invalid --page-title. Provide a non-empty Canvas page title.");
+    }
+    if (/\(draft\)\s*$/i.test(rawPageTitle)) {
+      throw new Error("Use the live Teacher Notes page title. The draft/review workflow has been removed.");
     }
 
-    if (opts.dryRun) {
-      console.log("Dry run: no Canvas updates performed.");
-      console.log("Generated HTML preview:");
-      console.log(built.notesHtml.split("\n").slice(0, 40).join("\n"));
+    const client = new CanvasClient();
+    if (opts.inspectInput) {
+      const inspection = await inspectTeacherNotesSourceForSession(
+        client,
+        courseId,
+        sessionName,
+        rawPageTitle
+      );
+      console.log(JSON.stringify(inspection, null, 2));
       return;
     }
 
-    const normalize = (v: string): string => v.trim().toLowerCase();
     const archivePage = async (pageUrl: string): Promise<string | undefined> => {
       const current = await client.getPage(courseId, pageUrl);
       const stamp = new Date().toISOString().replace(/[.:]/g, "-");
@@ -4987,93 +4983,67 @@ program.command("teacher-notes")
         body: current.body ?? "",
         published: false
       });
-      return archived.title;
+      return archived.title ?? undefined;
     };
+
+    const built = await buildTeacherNotesForSession(client, courseId, sessionName, rawPageTitle);
     const existingModulePage = built.moduleItems.find(
-      (item) => item.type === "Page" && normalize(item.title) === normalize(pageTitle) && !!item.page_url
+      (item) =>
+        item.type === "Page" &&
+        normalizeName(item.title) === normalizeName(rawPageTitle) &&
+        !!item.page_url
     );
 
-    let pageUrl: string;
-    let createdPage = false;
-    let createdModuleItem = false;
-    let movedModuleItem = false;
+    console.log(`Course: ${courseId}`);
+    console.log(`Session module: ${built.module.name} (${built.module.id})`);
+    console.log("Mode: live");
+    console.log(`Source pages: ${built.modulePages.length}`);
+    console.log(`Teacher notes title: ${rawPageTitle}`);
+    console.log(`Generation mode: ${built.generationMode}`);
+    if (built.generationWarning) {
+      console.log(`Generation fallback reason: ${built.generationWarning}`);
+    }
+    console.log(`Target module position: ${built.insertionPosition}`);
 
-    if (existingModulePage?.page_url) {
-      pageUrl = existingModulePage.page_url;
-      const archivedTitle = isDraftMode ? undefined : await archivePage(pageUrl);
-      await client.updatePage(courseId, pageUrl, {
-        title: pageTitle,
-        body: built.notesHtml,
-        published: true
-      });
-      if (archivedTitle) {
-        console.log(`Archived previous page content: ${archivedTitle}`);
-      }
-    } else {
-      const pages = await client.listPages(courseId, pageTitle);
-      const existingPage = pages.find((page) => normalize(page.title) === normalize(pageTitle));
-
-      if (existingPage) {
-        pageUrl = existingPage.url;
-        const archivedTitle = isDraftMode ? undefined : await archivePage(pageUrl);
-        await client.updatePage(courseId, pageUrl, {
-          title: pageTitle,
-          body: built.notesHtml,
-          published: true
-        });
-        if (archivedTitle) {
-          console.log(`Archived previous page content: ${archivedTitle}`);
-        }
-      } else {
-        const created = await client.createPage(courseId, {
-          title: pageTitle,
-          body: built.notesHtml,
-          published: true
-        });
-        pageUrl = created.url;
-        createdPage = true;
-      }
+    if (opts.dryRun) {
+      console.log("Dry run: no Canvas updates performed.");
+      console.log("Generated HTML preview:");
+      console.log(built.notesHtml.split("\n").slice(0, 40).join("\n"));
+      return;
     }
 
-    if (!isDraftMode) {
-      const moduleItemForPage = built.moduleItems.find(
-        (item) => item.type === "Page" && item.page_url === pageUrl
-      );
-
-      if (!moduleItemForPage) {
-        await client.createModulePageItem(courseId, built.module.id, {
-          title: pageTitle,
-          pageUrl,
-          position: built.insertionPosition,
-          indent: MODULE_ITEM_DEFAULT_INDENT
-        });
-        createdModuleItem = true;
-      } else if (
-        moduleItemForPage.position !== built.insertionPosition ||
-        (moduleItemForPage.indent ?? 0) !== MODULE_ITEM_DEFAULT_INDENT ||
-        normalize(moduleItemForPage.title) !== normalize(pageTitle)
-      ) {
-        await client.updateModuleItemPosition(
-          courseId,
-          built.module.id,
-          moduleItemForPage.id,
-          built.insertionPosition,
-          MODULE_ITEM_DEFAULT_INDENT,
-          pageTitle
-        );
-        movedModuleItem = true;
+    let archivedTitle: string | undefined;
+    const pageResult = await upsertCoursePageByTitle({
+      client,
+      courseId,
+      pageTitle: rawPageTitle,
+      bodyHtml: built.notesHtml,
+      published: true,
+      existingPageUrl: existingModulePage?.page_url ?? undefined,
+      beforeUpdate: async (pageUrl) => {
+        archivedTitle = await archivePage(pageUrl);
       }
-    }
+    });
+    const placementResult = await ensureModulePagePlacement({
+      client,
+      courseId,
+      moduleId: built.module.id,
+      moduleItems: built.moduleItems,
+      pageTitle: rawPageTitle,
+      pageUrl: pageResult.pageUrl,
+      insertionPosition: built.insertionPosition
+    });
 
-    console.log(createdPage ? "Created page." : "Updated existing page.");
-    if (isDraftMode) {
-      console.log("Draft mode: module placement unchanged.");
-    } else {
-      if (createdModuleItem) console.log("Added page to session module.");
-      if (movedModuleItem) console.log("Moved module item to top of session.");
-      if (!createdModuleItem && !movedModuleItem) console.log("Module item placement already correct.");
+    console.log(pageResult.createdPage ? "Created live Teacher Notes page." : "Updated live Teacher Notes page.");
+    if (archivedTitle) {
+      console.log(`Archived previous page content: ${archivedTitle}`);
     }
-    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageUrl}`);
+    if (placementResult.createdModuleItem) console.log("Added page under Teachers Notes.");
+    if (placementResult.movedModuleItem) console.log("Moved module item under Teachers Notes.");
+    if (!placementResult.createdModuleItem && !placementResult.movedModuleItem) {
+      console.log("Module item placement already correct.");
+    }
+    console.log(`Page URL: ${env.canvasBaseUrl}/courses/${courseId}/pages/${pageResult.pageUrl}`);
   });
 
 program.command("task-a-section")

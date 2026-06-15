@@ -52,6 +52,12 @@ export type CanvasFolder = {
   files_count?: number;
 };
 
+export type CanvasCourse = {
+  id: number;
+  name: string;
+  course_code?: string;
+};
+
 export type CanvasQuizSummary = {
   id: number;
   title: string;
@@ -262,6 +268,13 @@ export class CanvasClient {
     return this.request({
       method: "GET",
       path: `/api/v1/courses/${courseId}/modules/${moduleId}/items?per_page=100`
+    });
+  }
+
+  async getCourse(courseId: number): Promise<CanvasCourse> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/courses/${courseId}`
     });
   }
 

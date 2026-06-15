@@ -1,5 +1,6 @@
 import quizAgent from "./quiz/index.js";
 import taskAAgent from "./taskA/index.js";
+import teacherNotesAgent from "./teacherNotes/index.js";
 import todayIntroAgent from "./todayIntro/index.js";
 import ltiAgent from "./lti/index.js";
 
@@ -42,6 +43,9 @@ export default {
     if (url.pathname === "/task-a-content") {
       return taskAAgent.fetch(request, env);
     }
+    if (url.pathname === "/teacher-notes") {
+      return teacherNotesAgent.fetch(request, env);
+    }
     if (url.pathname === "/generate") {
       return Promise.resolve(
         new Response(
@@ -59,7 +63,7 @@ export default {
         new Response(
           JSON.stringify({
           error:
-            "Not found. Available routes: /generate-quiz, /today-intro, /task-a-content, /lti/config"
+            "Not found. Available routes: /generate-quiz, /today-intro, /task-a-content, /teacher-notes, /lti/config"
         }),
         {
           status: 404,
