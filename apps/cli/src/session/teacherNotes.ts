@@ -44,7 +44,7 @@ type CommonIssue = {
 };
 
 type CourseInsight = {
-  highlightAreas: string[];
+  teacherFocusHints: string[];
   issueHints: CommonIssue[];
 };
 
@@ -108,7 +108,6 @@ type TeacherNotesSourceEvidence = {
 
 const SOFTWARE_KEYWORDS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\barduino ide\b/i, label: "Arduino IDE" },
-  { pattern: /\bserial monitor\b/i, label: "Serial Monitor" },
   { pattern: /\bblender\b/i, label: "Blender" },
   { pattern: /\btinkercad\b/i, label: "Tinkercad" },
   { pattern: /\bmobile app\b|\bweb application\b|\bweb app\b/i, label: "Mobile web app" },
@@ -117,9 +116,12 @@ const SOFTWARE_KEYWORDS: Array<{ pattern: RegExp; label: string }> = [
 
 const HARDWARE_KEYWORDS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bzippy\b/i, label: "Nexgen Zippy robot" },
+  { pattern: /\bchassis\b/i, label: "Chassis" },
   { pattern: /\blcd\b/i, label: "LCD screen module" },
   { pattern: /\b3x4\b|\bmatrix keypad\b|\bkeypad\b/i, label: "3x4 matrix keypad" },
+  { pattern: /\bpcb\b/i, label: "PCB" },
   { pattern: /\besp32\b|\bnodemcu\b/i, label: "NodeMCU ESP32 board" },
+  { pattern: /\bbuck converter\b|\b5v buck\b/i, label: "5V buck converter" },
   { pattern: /\besp32-?cam\b|\bcamera\b|\bvideo streaming\b/i, label: "ESP32-CAM / camera module" },
   { pattern: /\bservo\b/i, label: "Servo motor" },
   { pattern: /\bmotor driver\b/i, label: "Motor driver module" },
@@ -129,6 +131,10 @@ const HARDWARE_KEYWORDS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bjumper wire/i, label: "Jumper wires" },
   { pattern: /\busb\b/i, label: "USB cable" },
   { pattern: /\bswitch\b/i, label: "Switch" },
+  { pattern: /\bstandoff\b/i, label: "Standoffs" },
+  { pattern: /\bwheel\b/i, label: "Wheels" },
+  { pattern: /\bcastor\b|\bcaster\b/i, label: "Castor wheel" },
+  { pattern: /\bmarble\b/i, label: "Marble" },
   { pattern: /\bdc connector\b|\bpower connector\b/i, label: "DC power connector" },
   { pattern: /\bmobile phone\b|\bphone\b/i, label: "Mobile phone" },
   { pattern: /\bsolder(?:ing)?\b|\bsoldering iron\b/i, label: "Soldering iron" },
@@ -138,7 +144,7 @@ const HARDWARE_KEYWORDS: Array<{ pattern: RegExp; label: string }> = [
 ];
 
 const HEURISTIC_TEACHER_FOCUS_FALLBACK =
-  "Watch for whether students can explain why their next change should work before they continue building.";
+  "Watch for students forcing parts into place instead of checking fit, orientation, and assembly order first.";
 
 export async function buildTeacherNotesForSession(
   client: CanvasClient,
@@ -175,6 +181,7 @@ export async function buildTeacherNotesForSession(
     quizEvidence,
     detectedDomains
   );
+  const allowTheoryTaskLanguage = hasResearchStyleTask(tasks);
   const courseInsight = buildCourseInsights(sessionName, evidenceText, detectedDomains);
   const sourceEvidence = buildTeacherNotesSourceEvidence(
     sessionName,
@@ -214,7 +221,10 @@ export async function buildTeacherNotesForSession(
       detectedDomains,
       quizEvidence
     );
-    const validation = validateTeacherNotesContent(completedAgentOutput, { detectedDomains });
+    const validation = validateTeacherNotesContent(completedAgentOutput, {
+      detectedDomains,
+      allowTheoryTaskLanguage
+    });
     if (validation.errors.length > 0) {
       throw new Error(`Teacher Notes contract validation failed: ${validation.errors.join(" | ")}`);
     }
@@ -350,9 +360,9 @@ function buildTeacherNotesAgentInput(
     modulePageTitles: modulePages.map((page) => page.title),
     contextKeywords,
     detectedDomains,
-    softwareHints: detectComponents(fullText, SOFTWARE_KEYWORDS, []),
-    hardwareHints: detectComponents(fullText, HARDWARE_KEYWORDS, []),
-    highlightAreaHints: courseInsight.highlightAreas,
+    softwareHints: detectRequiredSoftware(tasks, fullText),
+    hardwareHints: detectRequiredHardware(tasks, fullText),
+    highlightAreaHints: courseInsight.teacherFocusHints,
     commonIssueHints: buildAgentCommonIssues(tasks, fullText, sessionName, detectedDomains).map((issue) => ({
       issue: issue.issue,
       teacherMove: issue.solution
@@ -615,13 +625,8 @@ function renderTeacherNotesHtml(
     detectedDomains,
     fullText
   );
-  const software = detectComponents(fullText, SOFTWARE_KEYWORDS, ["Arduino IDE", "Serial Monitor"]);
-  const hardware = detectComponents(fullText, HARDWARE_KEYWORDS, [
-    "LCD screen module",
-    "3x4 matrix keypad",
-    "NodeMCU ESP32 board"
-  ]);
-  const highlightAreas = courseInsight.highlightAreas;
+  const software = detectRequiredSoftware(tasks, fullText);
+  const hardware = detectRequiredHardware(tasks, fullText);
   const commonIssues = buildCommonIssues(
     tasks,
     fullText,
@@ -633,36 +638,31 @@ function renderTeacherNotesHtml(
   const lines: string[] = [];
   lines.push(`<h2>${escapeHtml(pageTitle)}</h2>`);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mainSessionObjectiveHeading)}</h3>`);
-  lines.push("<ul>");
-  for (const point of normalizeStudentObjectives(objectivePoints)) {
-    lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
+  const normalizedObjectives = normalizeStudentObjectives(objectivePoints);
+  if (normalizedObjectives[0]) {
+    lines.push(`<p>${escapeHtml(normalizedObjectives[0])}</p>`);
   }
-  lines.push("</ul>");
   lines.push(
     `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherFocusLabel)}</strong> ${escapeHtml(
-      buildTeacherFocusFallback(courseInsight.highlightAreas)
+      buildTeacherFocusFallback(courseInsight.teacherFocusHints)
     )}</p>`
   );
   pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.componentsAndSoftwareHeading)}</h3>`);
   lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.softwareLabel)}</strong></p>`);
-  lines.push("<ul>");
-  for (const item of software) {
-    lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
+  if (software.length > 0) {
+    lines.push("<ul>");
+    for (const item of software) {
+      lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
+    }
+    lines.push("</ul>");
+  } else {
+    lines.push("<p>None required in this session.</p>");
   }
-  lines.push("</ul>");
   lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.hardwareLabel)}</strong></p>`);
   lines.push("<ul>");
   for (const item of (hardware.length > 0 ? hardware : ["N/A"])) {
     lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
-  }
-  lines.push("</ul>");
-
-  pushSectionDivider(lines);
-  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherHighlightAreasHeading)}</h3>`);
-  lines.push("<ul>");
-  for (const highlight of highlightAreas) {
-    lines.push(`<li><p>${escapeHtml(highlight)}</p></li>`);
   }
   lines.push("</ul>");
 
@@ -672,35 +672,19 @@ function renderTeacherNotesHtml(
     lines.push("<p>No usable task guidance was found in the current session pages. Update the Task A/B/C page content to expand this section automatically.</p>");
   }
   tasks.forEach((task, index) => {
-    lines.push(`<h4>${escapeHtml(task.title)}</h4>`);
+    lines.push(`<h4>${escapeHtml(buildTaskDisplayTitle(task))}</h4>`);
     lines.push(
       `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.outcomeLabel)}</strong> ${escapeHtml(
-        buildTaskSummary(task)
+        buildTaskOutcome(task, sessionName, detectedDomains)
       )}</p>`
     );
 
-    const taskPoints = buildTaskPoints(task);
+    const taskPoints = buildTaskKeyPoints(task);
     if (taskPoints.length > 0) {
-      lines.push(`<p>${escapeHtml(TEACHER_NOTES_TEMPLATE.reinforceLabel)}</p>`);
+      lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.keyPointsLabel)}</strong></p>`);
       lines.push("<ul>");
       for (const point of taskPoints) {
         lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
-      }
-      lines.push("</ul>");
-    }
-    const differentiation = buildTaskDifferentiation(task);
-    if (differentiation) {
-      lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.differentiationLabel)}</strong></p>`);
-      lines.push("<ul>");
-      if (differentiation.beginner) {
-        lines.push(
-          `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.beginnersLabel)}</strong> ${escapeHtml(differentiation.beginner)}</p></li>`
-        );
-      }
-      if (differentiation.extension) {
-        lines.push(
-          `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.extensionLabel)}</strong> ${escapeHtml(differentiation.extension)}</p></li>`
-        );
       }
       lines.push("</ul>");
     }
@@ -721,7 +705,7 @@ function renderTeacherNotesHtml(
     );
     lines.push("<ul>");
     lines.push(
-      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherMoveLabel)}</strong> ${escapeHtml(
+      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.solutionLabel)}</strong> ${escapeHtml(
         issue.solution
       )}</p></li>`
     );
@@ -740,11 +724,10 @@ function renderTeacherNotesHtmlFromAgent(
   const lines: string[] = [];
   lines.push(`<h2>${escapeHtml(pageTitle)}</h2>`);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.mainSessionObjectiveHeading)}</h3>`);
-  lines.push("<ul>");
-  for (const point of normalizeStudentObjectives(content.sessionObjective)) {
-    lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
+  const normalizedObjectives = normalizeStudentObjectives(content.sessionObjective);
+  if (normalizedObjectives[0]) {
+    lines.push(`<p>${escapeHtml(normalizedObjectives[0])}</p>`);
   }
-  lines.push("</ul>");
   if (content.teacherFocus) {
     lines.push(
       `<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherFocusLabel)}</strong> ${escapeHtml(content.teacherFocus)}</p>`
@@ -754,23 +737,19 @@ function renderTeacherNotesHtmlFromAgent(
   pushSectionDivider(lines);
   lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.componentsAndSoftwareHeading)}</h3>`);
   lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.softwareLabel)}</strong></p>`);
-  lines.push("<ul>");
-  for (const item of content.software) {
-    lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
+  if (content.software.length > 0) {
+    lines.push("<ul>");
+    for (const item of content.software) {
+      lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
+    }
+    lines.push("</ul>");
+  } else {
+    lines.push("<p>None required in this session.</p>");
   }
-  lines.push("</ul>");
   lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.hardwareLabel)}</strong></p>`);
   lines.push("<ul>");
   for (const item of (content.hardware.length > 0 ? content.hardware : ["N/A"])) {
     lines.push(`<li><p>${escapeHtml(item)}</p></li>`);
-  }
-  lines.push("</ul>");
-
-  pushSectionDivider(lines);
-  lines.push(`<h3>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherHighlightAreasHeading)}</h3>`);
-  lines.push("<ul>");
-  for (const highlight of content.highlightAreas) {
-    lines.push(`<li><p>${escapeHtml(highlight)}</p></li>`);
   }
   lines.push("</ul>");
 
@@ -788,34 +767,11 @@ function renderTeacherNotesHtmlFromAgent(
         )}</p>`
       );
     }
-    if (task.reinforce.length > 0) {
-      lines.push(`<p>${escapeHtml(TEACHER_NOTES_TEMPLATE.reinforceLabel)}</p>`);
+    if (task.keyPoints.length > 0) {
+      lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.keyPointsLabel)}</strong></p>`);
       lines.push("<ul>");
-      for (const point of task.reinforce) {
+      for (const point of task.keyPoints) {
         lines.push(`<li><p>${escapeHtml(point)}</p></li>`);
-      }
-      lines.push("</ul>");
-    }
-    if (task.goldenNuggets.length > 0) {
-      lines.push(`<p>${escapeHtml(TEACHER_NOTES_TEMPLATE.goldenNuggetsLabel)}</p>`);
-      lines.push("<ul>");
-      for (const nugget of task.goldenNuggets) {
-        lines.push(`<li><p>${escapeHtml(nugget)}</p></li>`);
-      }
-      lines.push("</ul>");
-    }
-    if (task.beginner || task.extension) {
-      lines.push(`<p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.differentiationLabel)}</strong></p>`);
-      lines.push("<ul>");
-      if (task.beginner) {
-        lines.push(
-          `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.beginnersLabel)}</strong> ${escapeHtml(task.beginner)}</p></li>`
-        );
-      }
-      if (task.extension) {
-        lines.push(
-          `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.extensionLabel)}</strong> ${escapeHtml(task.extension)}</p></li>`
-        );
       }
       lines.push("</ul>");
     }
@@ -836,7 +792,7 @@ function renderTeacherNotesHtmlFromAgent(
     );
     lines.push("<ul>");
     lines.push(
-      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.teacherMoveLabel)}</strong> ${escapeHtml(issue.teacherMove)}</p></li>`
+      `<li><p><strong>${escapeHtml(TEACHER_NOTES_TEMPLATE.solutionLabel)}</strong> ${escapeHtml(issue.solution)}</p></li>`
     );
     lines.push("</ul>");
     lines.push("</li>");
@@ -852,8 +808,8 @@ function pushSectionDivider(lines: string[]): void {
   }
 }
 
-function buildTeacherFocusFallback(highlightAreas: string[]): string {
-  return highlightAreas[0] ?? HEURISTIC_TEACHER_FOCUS_FALLBACK;
+function buildTeacherFocusFallback(teacherFocusHints: string[]): string {
+  return teacherFocusHints[0] ?? HEURISTIC_TEACHER_FOCUS_FALLBACK;
 }
 
 function applyContractFallbacks(
@@ -869,7 +825,7 @@ function applyContractFallbacks(
   const fallbackTasks = buildFallbackTaskOutputs(taskContexts);
   const fallbackIssues = buildAgentCommonIssues([], evidenceText, sessionName, detectedDomains).map((issue) => ({
     issue: issue.issue,
-    teacherMove: issue.solution
+    solution: issue.solution
   }));
 
   return {
@@ -878,13 +834,9 @@ function applyContractFallbacks(
       0,
       TEACHER_NOTES_CONTRACT.mainSessionObjective.maxEntries
     ),
-    teacherFocus: content.teacherFocus ?? buildTeacherFocusFallback(courseInsight.highlightAreas),
-    highlightAreas: dedupe([
-      ...content.highlightAreas,
-      ...courseInsight.highlightAreas
-    ]).slice(0, TEACHER_NOTES_CONTRACT.teacherHighlightAreas.maxEntries),
+    teacherFocus: content.teacherFocus ?? buildTeacherFocusFallback(courseInsight.teacherFocusHints),
     tasks: mergeFallbackTasks(content.tasks, fallbackTasks),
-    commonIssues: dedupeTeacherMoves([
+    commonIssues: dedupeIssueSolutions([
       ...content.commonIssues,
       ...fallbackIssues
     ]).slice(0, TEACHER_NOTES_CONTRACT.mostCommonIssues.maxEntries)
@@ -920,52 +872,24 @@ function sanitizeTeacherNotesAgentOutput(
         keepDomainSafeLine(task.outcome)
           ? task.outcome
           : undefined,
-      reinforce: task.reinforce.filter(
+      keyPoints: task.keyPoints.filter(
         (value) =>
           hasContextKeywordOverlap(value, taskKeywords) &&
           !isLowValueAdminLine(value) &&
           !isEditorialReviewMetaLine(value) &&
           keepDomainSafeLine(value)
-      ),
-      goldenNuggets: task.goldenNuggets.filter(
-        (value) =>
-          hasContextKeywordOverlap(value, taskKeywords) &&
-          !isLowValueAdminLine(value) &&
-          !isEditorialReviewMetaLine(value) &&
-          keepDomainSafeLine(value)
-      ),
-      beginner:
-        task.beginner &&
-        hasContextKeywordOverlap(task.beginner, taskKeywords) &&
-        !isEditorialReviewMetaLine(task.beginner) &&
-        keepDomainSafeLine(task.beginner)
-          ? task.beginner
-          : undefined,
-      extension:
-        task.extension &&
-        hasContextKeywordOverlap(task.extension, taskKeywords) &&
-        !isEditorialReviewMetaLine(task.extension) &&
-        keepDomainSafeLine(task.extension)
-          ? task.extension
-          : undefined
+      )
     };
-  }).filter((task) =>
-    !!task.outcome ||
-    task.reinforce.length > 0 ||
-    task.goldenNuggets.length > 0 ||
-    !!task.beginner ||
-    !!task.extension
-  );
+  }).filter((task) => !!task.outcome || task.keyPoints.length > 0);
 
-  const highlightAreas = content.highlightAreas.filter(keepSessionLine);
   const commonIssues = content.commonIssues.filter(
     (item) =>
       hasContextKeywordOverlap(item.issue, evidence.sessionKeywords) &&
-      hasContextKeywordOverlap(item.teacherMove, evidence.sessionKeywords) &&
+      hasContextKeywordOverlap(item.solution, evidence.sessionKeywords) &&
       !isEditorialReviewMetaLine(item.issue) &&
-      !isEditorialReviewMetaLine(item.teacherMove) &&
+      !isEditorialReviewMetaLine(item.solution) &&
       keepDomainSafeLine(item.issue) &&
-      keepDomainSafeLine(item.teacherMove)
+      keepDomainSafeLine(item.solution)
   );
   const teacherFocus =
     content.teacherFocus &&
@@ -973,7 +897,7 @@ function sanitizeTeacherNotesAgentOutput(
     !isEditorialReviewMetaLine(content.teacherFocus) &&
     keepDomainSafeLine(content.teacherFocus)
       ? content.teacherFocus
-      : buildTeacherFocusFallback(highlightAreas);
+      : buildTeacherFocusFallback([]);
 
   return {
     ...content,
@@ -987,7 +911,6 @@ function sanitizeTeacherNotesAgentOutput(
     teacherFocus,
     software: content.software.filter(keepSessionLine),
     hardware: content.hardware.filter(keepSessionLine),
-    highlightAreas,
     tasks: sanitizedTasks,
     commonIssues: commonIssues.slice(
       0,
@@ -1115,9 +1038,7 @@ function buildTeacherNotesSourceEvidence(
             ...(task.pageTitles ?? []),
             task.outcomeHint ?? "",
             ...(task.pageSummaries ?? []),
-            ...(task.reinforceHints ?? []),
-            task.beginnerHint ?? "",
-            task.extensionHint ?? ""
+            ...(task.keyPointHints ?? [])
           ],
           18
         )
@@ -1131,6 +1052,15 @@ function hasUsableTaskContent(task: SessionTask): boolean {
   return task.pages.some((page) => page.bodyText.trim().length > 0);
 }
 
+function hasResearchStyleTask(tasks: SessionTask[]): boolean {
+  return tasks.some((task) => {
+    const combined = `${task.title} ${task.pages.map((page) => `${page.title} ${page.bodyText}`).join(" ")}`.toLowerCase();
+    return /\bresearch\b|\bdeeper understanding\b|\bparts connect\b|\bwhat job does this part do\b|\bunderstand what each main .* part does\b/.test(
+      combined
+    );
+  });
+}
+
 function buildTeacherNotesTaskContexts(
   tasks: SessionTask[],
   sessionName: string,
@@ -1142,7 +1072,7 @@ function buildTeacherNotesTaskContexts(
     return usableTasks.map((task) => buildTeacherNotesTaskContext(task));
   }
   return buildSyntheticTaskContexts(
-    tasks.map((task) => task.title),
+    tasks.map((task) => buildTaskDisplayTitle(task)),
     sessionName,
     quizEvidence,
     detectedDomains
@@ -1150,17 +1080,14 @@ function buildTeacherNotesTaskContexts(
 }
 
 function buildTeacherNotesTaskContext(task: SessionTask): TeacherNotesAgentTaskInput {
-  const differentiation = buildTaskDifferentiation(task);
   return {
-    title: task.title,
+    title: buildTaskDisplayTitle(task),
     pageTitles: task.pages.map((page) => page.title),
-    outcomeHint: buildTaskSummary(task),
+    outcomeHint: buildTaskOutcome(task),
     pageSummaries: task.pages
       .map((page) => buildPageExcerpt(page.bodyText))
       .filter((summary): summary is string => Boolean(summary)),
-    reinforceHints: buildTaskPoints(task),
-    beginnerHint: differentiation?.beginner,
-    extensionHint: differentiation?.extension
+    keyPointHints: buildTaskKeyPoints(task)
   };
 }
 
@@ -1182,7 +1109,7 @@ function buildSyntheticTaskContexts(
       {
         pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
         outcomeHint: "Use Tinkercad tools accurately before starting the main customisation.",
-        reinforceHints: dedupe([
+        keyPointHints: dedupe([
           "Check that students can navigate the Tinkercad workspace without hunting for basic tools.",
           has(/\bbasic shape\b|\bshape\b/)
             ? "Push students to start from a small number of deliberate basic shapes before adding detail."
@@ -1196,7 +1123,7 @@ function buildSyntheticTaskContexts(
       {
         pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
         outcomeHint: "Create a Zippy customisation with a clear design purpose and workable fit.",
-        reinforceHints: dedupe([
+        keyPointHints: dedupe([
           has(/\bextrude\b/)
             ? "Ask students to explain what their extrusion or cut is doing to the model before approving it."
             : "",
@@ -1205,16 +1132,12 @@ function buildSyntheticTaskContexts(
           has(/\bgroup\b/)
             ? "Watch for grouped shapes that hide imprecise placement or make later edits harder."
             : ""
-        ]).slice(0, 4),
-        beginnerHint:
-          "Keep the change to one clean, well-positioned custom feature that still fits the existing body cleanly.",
-        extensionHint:
-          "Add a second feature only if it improves function or visual impact without making the design harder to print."
+        ]).slice(0, 4)
       },
       {
         pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
         outcomeHint: "Check print readiness and save a clean version of the design for later build work.",
-        reinforceHints: dedupe([
+        keyPointHints: dedupe([
           has(/\bfile format\b|\bstl\b|\b3d print/i)
             ? "Check that students know which export or file format is appropriate before they claim the design is finished."
             : "",
@@ -1228,7 +1151,7 @@ function buildSyntheticTaskContexts(
       {
         pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
         outcomeHint: "Identify the standout features and subsystems that make the Zippy demo work.",
-        reinforceHints: dedupe([
+        keyPointHints: dedupe([
           has(/\bbattery\b/)
             ? "Ask students to identify the battery or power source and explain what it enables on Zippy."
             : "",
@@ -1244,7 +1167,7 @@ function buildSyntheticTaskContexts(
       {
         pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
         outcomeHint: "Explain how Zippy's power, control, movement, and communication systems work together during the demo.",
-        reinforceHints: dedupe([
+        keyPointHints: dedupe([
           has(/\bcontrol\b/)
             ? "Listen for whether students can explain how Zippy is controlled, not just name a controller or input."
             : "",
@@ -1257,7 +1180,7 @@ function buildSyntheticTaskContexts(
       {
         pageTitles: quizEvidence.title ? [quizEvidence.title] : [],
         outcomeHint: "Use the demo as a reference point for later build and customisation sessions.",
-        reinforceHints: dedupe([
+        keyPointHints: dedupe([
           "Make students link one demo feature to a later build, coding, or customisation session before moving on.",
           "Have confident students predict which subsystem they would most like to customise first and why.",
           "Use quick compare-and-explain questions so the session feels active rather than presentational."
@@ -1268,21 +1191,21 @@ function buildSyntheticTaskContexts(
     templates = [
       {
         outcomeHint: "Prepare tools, parts, and the work area so the first joints are controlled and safe.",
-        reinforceHints: [
+        keyPointHints: [
           "Check iron handling, workspace setup, and component orientation before students begin soldering.",
           "Make students tin, position, and inspect simple parts before they move to denser joints."
         ]
       },
       {
         outcomeHint: "Solder the main components systematically and inspect each joint before moving on.",
-        reinforceHints: [
+        keyPointHints: [
           "Inspect for shiny joints, correct wetting, and no solder bridges before students continue.",
           "Pause on polarity and lead placement before heat makes rework expensive."
         ]
       },
       {
         outcomeHint: "Diagnose weak joints or faults by inspecting, testing continuity, and reworking with purpose.",
-        reinforceHints: [
+        keyPointHints: [
           "Require continuity or visual inspection before power-on.",
           "Ask students to explain whether a fault is likely a bridge, cold joint, polarity mistake, or wiring issue."
         ]
@@ -1295,21 +1218,21 @@ function buildSyntheticTaskContexts(
     templates = [
       {
         outcomeHint: "Verify the core wiring and power path before any code changes are made.",
-        reinforceHints: [
+        keyPointHints: [
           "Make students trace power, ground, and signal separately before they upload or test anything.",
           "Check connector orientation and cable placement before deeper troubleshooting."
         ]
       },
       {
         outcomeHint: "Upload or modify code in a controlled way and test one change at a time.",
-        reinforceHints: [
+        keyPointHints: [
           "Force one change, one test, one explanation.",
           "Use upload, error, or behaviour changes as evidence instead of guessing."
         ]
       },
       {
         outcomeHint: "Integrate the full system, test behaviour, and isolate faults systematically.",
-        reinforceHints: [
+        keyPointHints: [
           "Make students explain whether the next suspected fault is wiring, code, or hardware and why.",
           "Require a known-good checkpoint before students attempt extensions."
         ]
@@ -1319,21 +1242,21 @@ function buildSyntheticTaskContexts(
     templates = [
       {
         outcomeHint: "Prepare the printed parts, tools, and fasteners before permanent assembly begins.",
-        reinforceHints: [
+        keyPointHints: [
           "Check part clean-up, screw choice, and tool selection before students start fastening anything.",
           "Stop students from forcing parts together when a fit issue should be cleaned up first."
         ]
       },
       {
         outcomeHint: "Assemble the main structure in the correct order while protecting alignment.",
-        reinforceHints: [
+        keyPointHints: [
           "Watch build order closely so students do not lock in a part that blocks later assembly.",
           "Check hinge, orientation, and fastener placement before anything is tightened fully."
         ]
       },
       {
         outcomeHint: "Finish fit, fastening, and final checks so the build is stable and ready for later wiring or testing.",
-        reinforceHints: [
+        keyPointHints: [
           "Make students test fit and movement before they call the task complete.",
           "Ask students to identify one alignment or fit risk before they move on."
         ]
@@ -1343,21 +1266,21 @@ function buildSyntheticTaskContexts(
     templates = [
       {
         outcomeHint: "Wire the first subsystem carefully against the diagram and verify each connection.",
-        reinforceHints: [
+        keyPointHints: [
           "Have students trace each connection aloud against the diagram one at a time.",
           "Separate power, ground, and signal checks instead of treating the whole circuit as one mystery."
         ]
       },
       {
         outcomeHint: "Build or test the main circuit while catching the most likely miswires early.",
-        reinforceHints: [
+        keyPointHints: [
           "Check breadboard rows, pin order, and labelled signals before students power the circuit.",
           "Use one small test to prove the circuit is behaving as expected before extending it."
         ]
       },
       {
         outcomeHint: "Explain how the circuit should behave and isolate faults systematically if it does not.",
-        reinforceHints: [
+        keyPointHints: [
           "Ask what evidence would prove the issue is in wiring rather than code or hardware.",
           "Require one correction at a time, followed by an immediate retest."
         ]
@@ -1367,21 +1290,21 @@ function buildSyntheticTaskContexts(
     templates = [
       {
         outcomeHint: "Identify the key components or concepts that matter in this session.",
-        reinforceHints: [
+        keyPointHints: [
           "Ask students to name the part or concept and then explain its purpose in plain language.",
           "Use short compare-and-contrast questions to expose shallow memorisation early."
         ]
       },
       {
         outcomeHint: "Apply the concept to a practical example instead of leaving it at a definition level.",
-        reinforceHints: [
+        keyPointHints: [
           "Push students to connect the concept to a real part, signal, or robot behaviour.",
           "Check whether students can explain why the concept matters to the build."
         ]
       },
       {
         outcomeHint: "Use the concept as a basis for prediction, troubleshooting, or extension thinking.",
-        reinforceHints: [
+        keyPointHints: [
           "Ask students what they would expect to happen if one key part or idea changed.",
           "Listen for cause-and-effect explanations, not just repeated terms."
         ]
@@ -1391,21 +1314,21 @@ function buildSyntheticTaskContexts(
     templates = [
       {
         outcomeHint: "Build confidence with the core tools, ideas, or parts introduced in this session.",
-        reinforceHints: [
+        keyPointHints: [
           "Check that students can explain what they are doing and why before they move on.",
           "Use a short checkpoint so misunderstandings are corrected early."
         ]
       },
       {
         outcomeHint: "Complete the main practical task with deliberate choices and visible checks for quality.",
-        reinforceHints: [
+        keyPointHints: [
           "Ask students to justify their next change before they make it.",
           "Require one test or verification step before students call the task complete."
         ]
       },
       {
         outcomeHint: "Reflect on the result, fix one issue, and connect the work to the next stage of the project.",
-        reinforceHints: [
+        keyPointHints: [
           "Get students to explain one thing that worked and one thing they still need to improve.",
           "Link the task back to the wider project so students understand why it matters."
         ]
@@ -1420,11 +1343,7 @@ function buildSyntheticTaskContexts(
 }
 
 function buildDefaultTaskTitles(sessionName: string, count: number): string[] {
-  const match = sessionName.match(/^(Session\s+\d+)/i);
-  const sessionLabel = match?.[1] ?? "Session";
-  return Array.from({ length: count }, (_, index) =>
-    `${sessionLabel}: Task ${String.fromCharCode(65 + index)}`
-  );
+  return Array.from({ length: count }, (_, index) => `Task ${String.fromCharCode(65 + index)}`);
 }
 
 function buildFallbackTaskOutputs(
@@ -1433,10 +1352,7 @@ function buildFallbackTaskOutputs(
   return taskContexts.map((task) => ({
     title: task.title,
     outcome: task.outcomeHint,
-    reinforce: dedupe(task.reinforceHints ?? []).slice(0, 5),
-    goldenNuggets: [],
-    beginner: task.beginnerHint,
-    extension: task.extensionHint
+    keyPoints: dedupe(task.keyPointHints ?? []).slice(0, 5)
   }));
 }
 
@@ -1454,10 +1370,7 @@ function mergeFallbackTasks(
     return {
       title: task.title,
       outcome: task.outcome ?? candidate.outcome,
-      reinforce: dedupe([...task.reinforce, ...candidate.reinforce]).slice(0, 5),
-      goldenNuggets: dedupe(task.goldenNuggets).slice(0, 3),
-      beginner: task.beginner ?? candidate.beginner,
-      extension: task.extension ?? candidate.extension
+      keyPoints: dedupe([...task.keyPoints, ...candidate.keyPoints]).slice(0, 5)
     };
   });
 
@@ -1506,60 +1419,68 @@ function buildObjectivePoints(
   detectedDomains: TeacherNotesDomainKey[],
   evidenceText = ""
 ): string[] {
-  const points: string[] = [];
   const lowerEvidence = evidenceText.toLowerCase();
-  if (detectedDomains.includes("demo_orientation")) {
-    points.push("Explain what Nexgen Zippy can do and how the session connects to later build work.");
-    if (
-      /\bbattery\b|\bvideo streaming\b|\bcamera\b|\bcontrol\b|\bmotor\b|\bcommunication\b/.test(
-        lowerEvidence
-      )
-    ) {
-      points.push(
-        "Identify the systems that power Zippy, control it, move it, and communicate or stream information during the demo."
-      );
-    }
+  const introSentence = firstSentence(introPages.map((p) => p.bodyText).join(" "));
+  if (introSentence && !isPromotionalObjectiveSentence(introSentence)) {
+    return [normalizeStudentObjective(introSentence)];
   }
-  if (detectedDomains.includes("software_setup")) {
-    points.push("Set up the required software and confirm it is ready for later sessions.");
+
+  if (detectedDomains.includes("mechanical_build")) {
+    return [
+      "Students will assemble Zippy's main parts in the correct order so the robot is ready for wiring and testing next session."
+    ];
   }
   if (detectedDomains.includes("cad_3d")) {
-    points.push("Customise Zippy in Tinkercad while working within the available chassis space.");
-    points.push("Test design decisions against fit, clearance, and printability before treating the model as finished.");
-    if (/\bextrude\b|\bgroup\b|\bfile format\b|\bbasic shape\b/.test(lowerEvidence)) {
-      points.push(
-        "Use core Tinkercad tools such as basic shapes, grouping, and extrusion to build a printable customisation."
-      );
-    }
+    return [
+      "Students will create a Zippy customisation that fits the chassis and remains practical to print."
+    ];
+  }
+  if (detectedDomains.includes("software_setup")) {
+    return [
+      "Students will set up the required software and confirm it is ready for the next stage of the project."
+    ];
+  }
+  if (detectedDomains.includes("demo_orientation")) {
+    return [
+      "Students will explain the main Zippy features and how they connect to later build sessions."
+    ];
   }
   if (detectedDomains.includes("soldering")) {
-    points.push("Identify the soldering quality checks that matter before powering the robot or board.");
+    return [
+      "Students will produce clean, reliable soldered connections and check them before moving on."
+    ];
+  }
+  if (
+    detectedDomains.includes("coding_debugging") &&
+    detectedDomains.includes("wiring_electronics")
+  ) {
+    return [
+      "Students will wire and test Zippy methodically so faults can be isolated one change at a time."
+    ];
   }
   if (detectedDomains.includes("wiring_electronics")) {
-    points.push("Verify key wiring paths and explain how the circuit should be checked before testing.");
+    return [
+      "Students will connect the required parts correctly and explain how each connection should behave."
+    ];
   }
-  if (detectedDomains.includes("coding_debugging")) {
-    points.push("Use a simple test loop to confirm the software setup or code is working before moving on.");
+  if (detectedDomains.includes("theory_concepts")) {
+    return [
+      "Students will explain the main concepts or parts that this session depends on before applying them."
+    ];
   }
 
   const taskSequence = buildTaskSequenceObjective(tasks);
-  if (taskSequence && points.length < 2) {
-    points.push(taskSequence);
+  if (taskSequence) {
+    return [normalizeStudentObjective(taskSequence)];
   }
 
-  const introSentence = firstSentence(introPages.map((p) => p.bodyText).join(" "));
-  if (introSentence && !isPromotionalObjectiveSentence(introSentence)) {
-    points.push(toOutcomeBullet(introSentence));
+  if (/\bassemble\b|\bassembly\b/.test(lowerEvidence)) {
+    return [
+      `Students will complete the main assembly steps for ${sessionName.replace(/^Session\s+\d+\s*-\s*/i, "")}.`
+    ];
   }
 
-  if (points.length < 3) {
-    points.push(`Apply the core skills from ${sessionName} with increasing independence.`);
-  }
-  if (points.length < 3) {
-    points.push("Troubleshoot one issue at a time before requesting direct help.");
-  }
-
-  return dedupe(points).slice(0, 3);
+  return [`Students will apply the core skills from ${sessionName} in the intended task order.`];
 }
 
 function isPromotionalObjectiveSentence(value: string): boolean {
@@ -1568,22 +1489,123 @@ function isPromotionalObjectiveSentence(value: string): boolean {
   );
 }
 
-function buildTaskSummary(task: SessionTask): string {
-  const sources = task.pages.map((page) => page.title).join(", ");
-  return `Complete the activities in ${sources}.`;
+function buildTaskDisplayTitle(task: SessionTask): string {
+  const parsed = parseTaskHeader(task.title);
+  const taskLabel = parsed ? `Task ${parsed.taskLabel}` : task.title;
+  const subject = deriveTaskSubject(task);
+  return subject ? `${taskLabel} - ${subject}` : taskLabel;
 }
 
-function buildTaskPoints(task: SessionTask): string[] {
-  const points: string[] = [];
-  for (const page of task.pages) {
-    const sentence = firstSentence(page.bodyText);
-    if (sentence) {
-      points.push(toOutcomeBullet(sentence));
-      continue;
-    }
-    points.push(`Complete "${page.title}" and verify it works before moving on.`);
+function deriveTaskSubject(task: SessionTask): string {
+  const pageTitles = task.pages.map((page) => page.title.trim()).filter(Boolean);
+  if (pageTitles.length === 0) return "";
+  if (pageTitles.length === 1) return pageTitles[0];
+
+  const prefixes = pageTitles
+    .map((title) => {
+      const match = title.match(/^(.+?)\s*-\s*/);
+      return match?.[1]?.trim();
+    })
+    .filter((value): value is string => Boolean(value));
+
+  if (prefixes.length === pageTitles.length && prefixes.every((value) => value === prefixes[0])) {
+    return prefixes[0];
   }
-  return dedupe(points).slice(0, 3);
+
+  return pageTitles[0];
+}
+
+function buildTaskOutcome(
+  task: SessionTask,
+  sessionName = "",
+  detectedDomains: TeacherNotesDomainKey[] = []
+): string {
+  const titleContext = buildTaskDisplayTitle(task).toLowerCase();
+  const bodyContext = task.pages.map((page) => page.bodyText).join(" ").toLowerCase();
+  const pageTitleContext = task.pages.map((page) => page.title).join(" ").toLowerCase();
+
+  if (/\bgather parts\b|\bparts for assembly\b/.test(titleContext)) {
+    return "Students gather the required parts and tools so the main assembly can start smoothly.";
+  }
+  if (/\bresearch\b|\bdeeper understanding\b|\bparts connect\b/.test(titleContext + bodyContext)) {
+    return "Students identify what each main part does before wiring begins next session.";
+  }
+  if (/\bassembly\b/.test(titleContext) || /\bassembly\b/.test(pageTitleContext)) {
+    return "Students assemble Zippy's main mechanical components in the correct order so the chassis is ready for wiring next session.";
+  }
+  if (/\binstall\b|\bsetup\b/.test(bodyContext)) {
+    return "Students complete the required setup and confirm it works before moving on.";
+  }
+
+  const summary = buildTaskSequenceObjective([task]);
+  if (summary) {
+    return normalizeStudentObjective(summary);
+  }
+
+  const trimmedSession = sessionName.replace(/^Session\s+\d+\s*-\s*/i, "");
+  return trimmedSession
+    ? `Students complete the main ${trimmedSession.toLowerCase()} work for this task.`
+    : "Students complete the main result expected in this task.";
+}
+
+function buildTaskKeyPoints(task: SessionTask): string[] {
+  const titleContext = buildTaskDisplayTitle(task).toLowerCase();
+  const context = `${task.title} ${task.pages.map((page) => `${page.title} ${page.bodyText}`).join(" ")}`.toLowerCase();
+
+  if (/\bgather parts\b|\bparts for assembly\b/.test(titleContext)) {
+    return [
+      "Check that students have the correct parts, fasteners, and tools laid out before the main assembly starts.",
+      "Make students fix wire length issues now by cutting and re-stripping any leads that are obviously too long.",
+      "Use the exploded view to confirm that students can identify the major parts before they begin fastening anything."
+    ];
+  }
+
+  if (/\bdeeper understanding\b|\bresearch\b|\bparts connect\b/.test(titleContext + context)) {
+    return [
+      "Keep the task focused on what each part does, not on starting the physical wiring early.",
+      "Check that students can explain why the motor drivers are needed instead of connecting the motors directly.",
+      "Use the research questions to expose misconceptions about power, switching, and PCB organisation before the next session."
+    ];
+  }
+
+  const points: string[] = [];
+
+  if (/\bnot overtight\b|\bfinger-tight\b|\btight fit\b/.test(context)) {
+    points.push("Check that students secure screws and terminal blocks firmly without over-tightening them.");
+  }
+  if (/\bwires are on the top\b|\bopposite direction\b|\bcable tie\b/.test(context)) {
+    points.push("Check motor orientation and wire direction before both motors are fixed in place.");
+  }
+  if (/\btoo long\b|\bre-strip\b|\bslack\b|\bwirestrippers?\b/.test(context)) {
+    points.push("Make students shorten, re-strip, and twist wires neatly when extra slack will interfere with the build.");
+  }
+  if (/\balign\b|\bshaft\b|\bslot it onto\b|\bcastor\b|\bmarble\b/.test(context)) {
+    points.push("Watch alignment closely so students do not force wheels, shafts, or the castor into place when they are slightly off.");
+  }
+  if (/\bstandoff\b|\bpcb\b|\besp32\b|\bbuck converter\b/.test(context)) {
+    points.push("Check that the standoffs, PCB, ESP32, and buck converter are positioned correctly before the top layer is screwed down.");
+  }
+  if (/\bswitch\b/.test(context)) {
+    points.push("Stop students from forcing the switch or other tight-fitting parts past the point where the chassis may be damaged.");
+  }
+  if (/\bdo not connect any wires yet\b|\bresearch\b|\bwhat job does this part do\b/.test(context)) {
+    points.push("Keep the research task focused on part purpose and connection logic; do not let students begin wiring early.");
+  }
+  if (/\bcheck your work\b|\blook a bit like this\b/.test(context)) {
+    points.push("Require a visible quality check after each mini-step so students catch a bad fit before it carries into the next assembly stage.");
+  }
+
+  if (points.length === 0) {
+    for (const page of task.pages) {
+      const sentence = firstSentence(page.bodyText);
+      if (sentence) {
+        points.push(toOutcomeBullet(sentence));
+      }
+      if (points.length >= 3) break;
+    }
+  }
+
+  return dedupe(points).slice(0, 5);
 }
 
 function buildCommonIssues(
@@ -1595,67 +1617,73 @@ function buildCommonIssues(
 ): CommonIssue[] {
   const issues: CommonIssue[] = [];
   const lower = fullText.toLowerCase();
-  const isSoldering = isSolderingContext(sessionName, fullText);
 
-  if (/\bwiring\b/.test(lower)) {
+  if (/\bnot overtight\b|\bfinger-tight\b/.test(lower)) {
     issues.push({
-      issue: "Incorrect pin wiring between the board, LCD, and keypad.",
-      solution: "Have students trace each wire against the diagram one connection at a time, then re-test after each correction."
+      issue: "Students over-tighten screws or terminal blocks and damage the part or strip the connection.",
+      solution: "Stop them at the first sign of resistance and reset the expectation to firm, secure fastening rather than maximum force."
     });
   }
-  if (/\bupload\b|\bcompile\b/.test(lower)) {
+  if (/\btoo long\b|\bre-strip\b|\bslack\b/.test(lower)) {
     issues.push({
-      issue: "Sketch upload errors caused by board/port configuration mistakes.",
-      solution: "Check board model, selected port, cable quality, and close any app using the serial connection before retrying."
+      issue: "Students leave motor or switch wires too long, which creates slack, strain, or a messy fit.",
+      solution: "Have them cut the wire to a sensible length, re-strip it cleanly, twist the strands, and reconnect it neatly before continuing."
     });
   }
-  if (/\bkeypad\b/.test(lower)) {
+  if (/\bwires are on the top\b|\bopposite direction\b/.test(lower)) {
     issues.push({
-      issue: "Incorrect row/column mapping in keypad code.",
-      solution: "Compare keypad wiring to the row/column array in code and test each key in Serial Monitor to confirm mapping."
+      issue: "Students mount the motors with the wrong orientation or wire direction.",
+      solution: "Pause the build, compare both motors to the reference animation, and fix the orientation before the rest of the assembly locks it in."
     });
   }
-  if (/\blcd\b/.test(lower)) {
+  if (/\balign\b|\bshaft\b|\bslot it onto\b/.test(lower)) {
     issues.push({
-      issue: "LCD output not displaying as expected.",
-      solution: "Verify power and data pins, adjust LCD contrast, and run a minimal known-good test sketch first."
+      issue: "Students try to force a wheel, shaft, or moving part before it is properly aligned.",
+      solution: "Make them back the part out, realign it carefully, and test the fit again rather than pushing harder."
+    });
+  }
+  if (/\btight fit\b|\bdoesn't fit\b|\bdoes not fit\b/.test(lower)) {
+    issues.push({
+      issue: "Students assume a tight-fitting component should be forced into place.",
+      solution: "Tell them to stop and re-check the orientation, fit, and reference image before applying more pressure."
+    });
+  }
+  if (/\bdo not connect any wires yet\b/.test(lower)) {
+    issues.push({
+      issue: "Students start wiring during the research task instead of just identifying part roles and connections.",
+      solution: "Keep them on the research questions only and hold off any physical wiring until the next session."
     });
   }
 
-  if (isSoldering) {
-    issues.push(...buildSolderingIssues());
+  if (detectedDomains.includes("cad_3d")) {
+    issues.push({
+      issue: "Students design a feature that looks interesting but will not attach or print cleanly.",
+      solution: "Check fit, clearance, and printability before the design is treated as finished."
+    });
   }
-
   if (detectedDomains.includes("demo_orientation")) {
-    issues.push(
-      {
-        issue: "Students remember the exciting feature they saw but cannot explain which subsystem made it possible.",
-        solution: "Pause the demo and ask students to name the exact part or system responsible for that behaviour before moving on."
-      },
-      {
-        issue: "Students mix up power, control, movement, and communication when describing how Zippy works.",
-        solution: "Have students sort one observed feature into the correct system bucket, then justify why it belongs there."
-      }
-    );
+    issues.push({
+      issue: "Students remember the exciting feature but cannot explain which subsystem made it happen.",
+      solution: "Pause the demo and make them name the exact part or subsystem responsible before moving on."
+    });
+  }
+  if (detectedDomains.includes("software_setup")) {
+    issues.push({
+      issue: "Students say setup is complete without proving the software or board connection actually works.",
+      solution: "Run one short success check before they leave setup: open the tool, choose the right board, and confirm the expected connection appears."
+    });
   }
 
   issues.push(...issueHints);
 
-  if (issues.length < 3 && tasks.length > 0) {
+  if (issues.length < 2 && tasks.length > 0) {
     issues.push({
-      issue: "Students make multiple changes at once and lose track of the cause of errors.",
-      solution: "Enforce one-change-at-a-time debugging and require a quick test after each change."
-    });
-  }
-  if (issues.length < 4) {
-    issues.push({
-      issue: "Students forget to save a known-good version before experimenting.",
-      solution: "Set mandatory checkpoint saves after each working milestone before extensions."
+      issue: "Students move to the next step without checking whether the current assembly still looks correct.",
+      solution: "Add a quick compare-to-reference checkpoint before each new stage begins."
     });
   }
 
-  const maxIssues = isSoldering ? 8 : 6;
-  return dedupeIssues(issues).slice(0, maxIssues);
+  return dedupeIssues(issues).slice(0, TEACHER_NOTES_CONTRACT.mostCommonIssues.maxEntries);
 }
 
 function buildAgentCommonIssues(
@@ -1664,25 +1692,7 @@ function buildAgentCommonIssues(
   sessionName: string,
   detectedDomains: TeacherNotesDomainKey[]
 ): CommonIssue[] {
-  const issues = buildCommonIssues(tasks, fullText, [], sessionName, detectedDomains);
-  const lower = fullText.toLowerCase();
-
-  if (/\b(tinkercad|3d|modelling|modeling|3d\s+print(?:ing)?|printability|printable|chassis|overhang|wall thickness)\b/.test(lower)) {
-    issues.push({
-      issue: "Students create designs that look interesting but will not attach securely to Zippy.",
-      solution: "Pause before printing and make students point to the exact contact surfaces, clearances, and fixing points on the model."
-    });
-    issues.push({
-      issue: "Students scale parts by eye and end up with pieces that are too large, too thin, or unstable.",
-      solution: "Have students measure against the reference model and check wall thickness, overhangs, and footprint before approving the print."
-    });
-    issues.push({
-      issue: "Students keep decorating without a clear design purpose and lose time on weak ideas.",
-      solution: "Ask what the change improves for Zippy: fit, function, or appearance. If they cannot answer, simplify the design."
-    });
-  }
-
-  return dedupeIssues(issues).slice(0, 6);
+  return buildCommonIssues(tasks, fullText, [], sessionName, detectedDomains);
 }
 
 function buildCourseInsights(
@@ -1690,52 +1700,29 @@ function buildCourseInsights(
   moduleText: string,
   detectedDomains: TeacherNotesDomainKey[]
 ): CourseInsight {
-  const isSoldering = isSolderingContext(sessionName, moduleText);
-  const highlightAreas = dedupe(
-    detectedDomains.flatMap((domainKey) =>
-      TEACHER_NOTES_CONTRACT.domains[domainKey].strongTeacherMoves.slice(0, 2)
-    )
-  );
+  const teacherFocusHints: string[] = [];
+  const lower = `${sessionName} ${moduleText}`.toLowerCase();
 
-  if (isSoldering) {
-    highlightAreas.push(
-      "Soldering quality control should be explicit: inspect every joint, check for bridges, and confirm continuity before power-on."
+  if (/\bnot overtight\b|\bfinger-tight\b/.test(lower)) {
+    teacherFocusHints.push("Check that students do not over-tighten screws or terminal blocks while assembling.");
+  }
+  if (/\btoo long\b|\bre-strip\b|\bslack\b/.test(lower)) {
+    teacherFocusHints.push("Check wire length and have students cut and re-strip wires that will create slack or strain.");
+  }
+  if (/\bwires are on the top\b|\balign\b|\btight fit\b|\bcastor\b|\bpcb\b|\bstandoff\b/.test(lower)) {
+    teacherFocusHints.push("Check that parts are oriented and seated correctly before students lock them in with screws or pressure.");
+  }
+  if (teacherFocusHints.length === 0) {
+    teacherFocusHints.push(
+      ...detectedDomains.flatMap((domainKey) =>
+        TEACHER_NOTES_CONTRACT.domains[domainKey].strongTeacherMoves.slice(0, 1)
+      )
     );
-  }
-  if (highlightAreas.length < 3) {
-    highlightAreas.push(
-      "Use formative checkpoints after each task so misconceptions are corrected early instead of carrying into later tasks."
-    );
-  }
-  if (highlightAreas.length < 3) {
-    highlightAreas.push(
-      "Ask students to explain why a fix worked, not just what they changed, to strengthen transferable troubleshooting habits."
-    );
-  }
-
-  const issueHints: CommonIssue[] = [];
-  if (/\b(upload|compile|port|board)\b/i.test(moduleText)) {
-    issueHints.push({
-      issue: "Board/port mismatch appears repeatedly across sessions.",
-      solution: "Run a 30-second board-port-cable check at the start of practical work before opening debugging support."
-    });
-  }
-  if (/\b(wiring|pin|connection)\b/i.test(moduleText)) {
-    issueHints.push({
-      issue: "Wiring mistakes recur across multiple sessions.",
-      solution: "Require students to annotate each verified connection and get a peer check before upload."
-    });
-  }
-  if (/\b(save|checkpoint|version)\b/i.test(moduleText)) {
-    issueHints.push({
-      issue: "Students lose working versions after experimentation.",
-      solution: "Mandate named checkpoints after each passing milestone before extension changes."
-    });
   }
 
   return {
-    highlightAreas: dedupe(highlightAreas).slice(0, 5),
-    issueHints: dedupeIssues(issueHints)
+    teacherFocusHints: dedupe(teacherFocusHints).slice(0, 4),
+    issueHints: []
   };
 }
 
@@ -1821,6 +1808,31 @@ function findTeacherNotesInsertionPosition(items: CanvasModuleItem[]): number {
   );
   if (teacherHeader) return teacherHeader.position + 1;
   return sorted.length === 0 ? 1 : sorted[0].position;
+}
+
+function detectRequiredSoftware(tasks: SessionTask[], text: string): string[] {
+  return detectComponents(tasks.map((task) => task.pages.map((page) => page.bodyText).join(" ")).join(" "), SOFTWARE_KEYWORDS, []);
+}
+
+function detectRequiredHardware(tasks: SessionTask[], text: string): string[] {
+  const taskText = tasks
+    .filter((task) => {
+      const parsed = parseTaskHeader(task.title);
+      return !parsed || parsed.taskLabel === "A" || parsed.taskLabel === "B";
+    })
+    .map((task) => task.pages.map((page) => page.bodyText).join(" "))
+    .join(" ");
+  const sourceText = taskText || text;
+  const toolLabels = new Set([
+    "Soldering iron",
+    "Flux / solder paste",
+    "Multimeter (continuity mode)",
+    "Desoldering braid / solder wick"
+  ]);
+
+  return detectComponents(sourceText, HARDWARE_KEYWORDS, [])
+    .filter((label) => !toolLabels.has(label))
+    .filter((label) => label !== "Battery pack / batteries" || !/\bnot needed today\b/i.test(sourceText));
 }
 
 function detectComponents(
@@ -1978,19 +1990,19 @@ function dedupeIssues(values: CommonIssue[]): CommonIssue[] {
   return out;
 }
 
-function dedupeTeacherMoves(
-  values: Array<{ issue: string; teacherMove: string }>
-): Array<{ issue: string; teacherMove: string }> {
+function dedupeIssueSolutions(
+  values: Array<{ issue: string; solution: string }>
+): Array<{ issue: string; solution: string }> {
   const seen = new Set<string>();
-  const out: Array<{ issue: string; teacherMove: string }> = [];
+  const out: Array<{ issue: string; solution: string }> = [];
   for (const value of values) {
     const issue = value.issue.replace(SPACE_RE, " ").trim();
-    const teacherMove = value.teacherMove.replace(SPACE_RE, " ").trim();
-    if (!issue || !teacherMove) continue;
+    const solution = value.solution.replace(SPACE_RE, " ").trim();
+    if (!issue || !solution) continue;
     const key = issue.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ issue, teacherMove });
+    out.push({ issue, solution });
   }
   return out;
 }

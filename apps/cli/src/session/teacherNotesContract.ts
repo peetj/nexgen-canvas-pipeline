@@ -11,10 +11,7 @@ export type TeacherNotesDomainKey =
 export type TeacherNotesValidationTask = {
   title: string;
   outcome?: string;
-  reinforce: string[];
-  goldenNuggets: string[];
-  beginner?: string;
-  extension?: string;
+  keyPoints: string[];
 };
 
 export type TeacherNotesValidationContent = {
@@ -22,9 +19,8 @@ export type TeacherNotesValidationContent = {
   teacherFocus?: string;
   software: string[];
   hardware: string[];
-  highlightAreas: string[];
   tasks: TeacherNotesValidationTask[];
-  commonIssues: Array<{ issue: string; teacherMove: string }>;
+  commonIssues: Array<{ issue: string; solution: string }>;
 };
 
 type TeacherNotesDomainGuidance = {
@@ -343,21 +339,13 @@ export const TEACHER_NOTES_CONTRACT = {
     useHrBetweenSections: true
   },
   mainSessionObjective: {
-    minEntries: 2,
-    maxEntries: 3,
+    minEntries: 1,
+    maxEntries: 1,
     renderIntroLine: false,
     validPrefixes: ["Students will", "Students can"]
   },
   teacherFocus: {
     render: true
-  },
-  teacherHighlightAreas: {
-    minEntries: 2,
-    maxEntries: 5
-  },
-  taskGuidance: {
-    renderGoldenNuggetsOnlyWhenPresent: true,
-    renderDifferentiationOnlyWhenPresent: true
   },
   mostCommonIssues: {
     minEntries: 2,
@@ -367,18 +355,24 @@ export const TEACHER_NOTES_CONTRACT = {
     sectionOrder: [
       "Main Session Objective",
       "Components & Software Required",
-      "Teacher Highlight Areas",
       "Task-by-Task Guidance",
       "Most Common Issues"
     ],
-    renderTeacherFocusAfterObjectives: true,
-    renderGoldenNuggetsOnlyWhenPresent: true,
-    renderDifferentiationOnlyWhenPresent: true
+    renderTeacherFocusAfterObjectives: true
   },
   prompt: {
     globalRules: [
       "Use the fixed top-level sections and do not invent extra top-level headings.",
       "Teacher Notes are not a lesson summary. They exist to help a teacher make fast, high-value interventions.",
+      "Main Session Objective must be a single sentence, usually grounded in the Introduction page rather than a list of all session activities.",
+      "Teacher Focus must be about the mistakes, checks, or warning signs the teacher should watch for in this session.",
+      "Remove Teacher Highlight Areas entirely. Do not recreate that section under another name.",
+      "Task-by-Task Guidance must use the task title format 'Task X - <task title>'.",
+      "Task outcomes must describe the actual student result for that task, not 'Complete the activities in...'.",
+      "Task key points must be concrete watch-fors and guidance checks drawn from that task's evidence.",
+      "Do not include differentiation, beginner/extension tracks, or golden nuggets.",
+      "Most Common Issues must stay inside this session's scope. Do not leak soldering, wiring, or coding issues into an assembly session unless the session evidence genuinely requires them.",
+      "Common issues must use the keys issue and solution.",
       "Prefer concrete checks, hidden failure patterns, and fast teacher moves over generic pedagogy.",
       "Stay grounded in the actual session evidence and task order.",
       "Reject cross-domain leakage when the session evidence does not support it."
@@ -424,7 +418,8 @@ const SOURCE_SCAFFOLD_PATTERNS = [
   /Optional Agent Brief/i
 ] as const;
 
-function normalizeLine(value: string): string {
+function normalizeLine(value: string | undefined): string {
+  if (!value) return "";
   return value.replace(/\s+/g, " ").trim();
 }
 
@@ -442,16 +437,12 @@ function collectContentLines(content: TeacherNotesValidationContent): string[] {
     ...(content.teacherFocus ? [content.teacherFocus] : []),
     ...content.software,
     ...content.hardware,
-    ...content.highlightAreas,
     ...content.tasks.flatMap((task) => [
       task.title,
       ...(task.outcome ? [task.outcome] : []),
-      ...task.reinforce,
-      ...task.goldenNuggets,
-      ...(task.beginner ? [task.beginner] : []),
-      ...(task.extension ? [task.extension] : [])
+      ...task.keyPoints
     ]),
-    ...content.commonIssues.flatMap((item) => [item.issue, item.teacherMove])
+    ...content.commonIssues.flatMap((item) => [item.issue, item.solution])
   ].map(normalizeLine).filter(Boolean);
 }
 
@@ -514,19 +505,20 @@ export function buildTeacherNotesPromptGuidance(
 
 export function validateTeacherNotesContent(
   content: TeacherNotesValidationContent,
-  input: { detectedDomains?: TeacherNotesDomainKey[] }
+  input: { detectedDomains?: TeacherNotesDomainKey[]; allowTheoryTaskLanguage?: boolean }
 ): TeacherNotesValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
   const lines = collectContentLines(content);
   const combined = lines.join("\n");
   const detectedDomains = input.detectedDomains ?? [];
+  const allowTheoryTaskLanguage = input.allowTheoryTaskLanguage ?? false;
 
   if (
     content.sessionObjective.length < TEACHER_NOTES_CONTRACT.mainSessionObjective.minEntries ||
     content.sessionObjective.length > TEACHER_NOTES_CONTRACT.mainSessionObjective.maxEntries
   ) {
-    errors.push("Main Session Objective must contain 2 to 3 bullets.");
+    errors.push("Main Session Objective must contain exactly 1 objective.");
   }
 
   for (const objective of content.sessionObjective) {
@@ -539,11 +531,13 @@ export function validateTeacherNotesContent(
     errors.push("Teacher Focus is required.");
   }
 
-  if (
-    content.highlightAreas.length < TEACHER_NOTES_CONTRACT.teacherHighlightAreas.minEntries ||
-    content.highlightAreas.length > TEACHER_NOTES_CONTRACT.teacherHighlightAreas.maxEntries
-  ) {
-    errors.push("Teacher Highlight Areas must contain 2 to 5 entries.");
+  for (const task of content.tasks) {
+    if (!task.outcome) {
+      errors.push(`Task "${task.title}" is missing an outcome.`);
+    }
+    if (task.keyPoints.length === 0) {
+      errors.push(`Task "${task.title}" must contain at least 1 key point.`);
+    }
   }
 
   if (
@@ -574,6 +568,7 @@ export function validateTeacherNotesContent(
       [TeacherNotesDomainKey, TeacherNotesDomainGuidance]
     >) {
       if (active.has(domainKey)) continue;
+      if (domainKey === "theory_concepts" && allowTheoryTaskLanguage) continue;
       if (domain.leakageSignals.some((pattern) => pattern.test(combined))) {
         errors.push(
           `Output contains ${domain.label} language but the session evidence does not mark that domain as active.`

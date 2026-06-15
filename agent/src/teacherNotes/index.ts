@@ -8,9 +8,8 @@ type TeacherNotesTaskContext = {
   pageTitles?: string[];
   outcomeHint?: string;
   pageSummaries?: string[];
+  keyPointHints?: string[];
   reinforceHints?: string[];
-  beginnerHint?: string;
-  extensionHint?: string;
 };
 
 type TeacherNotesSourcePage = {
@@ -44,10 +43,7 @@ type Env = {
 type TeacherNotesTaskResponse = {
   title: string;
   outcome?: string;
-  reinforce: string[];
-  goldenNuggets: string[];
-  beginner?: string;
-  extension?: string;
+  keyPoints: string[];
 };
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -141,29 +137,18 @@ function sanitizeTasks(
     const title = toNonEmptyString(record.title) ?? fallbackTitles[i];
     if (!title) continue;
 
+    const keyPoints = toStringArray(record.keyPoints, 5);
     const reinforce = toStringArray(record.reinforce, 5);
-    const goldenNuggets = toStringArray(record.goldenNuggets, 3);
     const outcome = toNonEmptyString(record.outcome);
-    const beginner = toNonEmptyString(record.beginner);
-    const extension = toNonEmptyString(record.extension);
 
-    if (
-      !outcome &&
-      reinforce.length === 0 &&
-      goldenNuggets.length === 0 &&
-      !beginner &&
-      !extension
-    ) {
+    if (!outcome && keyPoints.length === 0 && reinforce.length === 0) {
       continue;
     }
 
     out.push({
       title,
       outcome,
-      reinforce,
-      goldenNuggets,
-      beginner,
-      extension
+      keyPoints: keyPoints.length > 0 ? keyPoints : reinforce
     });
 
     if (out.length >= max) break;
@@ -185,11 +170,11 @@ function mergeFallbackLines(primary: string[], fallback: string[], min: number, 
 }
 
 function mergeFallbackIssues(
-  primary: Array<{ issue: string; teacherMove: string }>,
-  fallback: Array<{ issue: string; teacherMove: string }>,
+  primary: Array<{ issue: string; solution: string }>,
+  fallback: Array<{ issue: string; solution: string }>,
   min: number,
   max: number
-): Array<{ issue: string; teacherMove: string }> {
+): Array<{ issue: string; solution: string }> {
   const out = [...primary];
   const seen = new Set(out.map((item) => item.issue.toLowerCase()));
   for (const item of fallback) {
@@ -209,14 +194,18 @@ function buildSystemPrompt(): string {
     "Primary question: how can the teacher maximise help to students to build an effective project?",
     "The page structure is fixed. You are filling sections, not inventing a new format.",
     "Each section has a specific meaning.",
-    "Main Session Objective: 2-3 bullets only, student-facing only, each beginning with 'Students will' or 'Students can'. No teacher advice here.",
-    "Teacher Focus: one sentence immediately after the objectives. It should capture the single highest-leverage thing the teacher should watch, inspect, or listen for in this session.",
-    "Components & Software Required: include only items clearly grounded in the supplied context. If hardware is not genuinely needed, return an empty hardware array.",
-    "Teacher Highlight Areas: 2-5 concrete teacher watch-fors or intervention checkpoints. These should be worth underlining before class begins.",
-    "Task-by-Task Guidance: for each task, give an outcome, teacher reinforcement points, rare optional golden nuggets, and optional differentiation only when it is genuinely useful for that task.",
-    "Most Common Issues: observable student failure patterns or misconceptions paired with the fastest useful teacher move.",
-    "Golden nuggets should be rare, specific, and genuinely high-value. If you do not have one, return an empty array.",
-    "Differentiation is optional. Do not force it into every task.",
+    "Main Session Objective: exactly 1 sentence only, student-facing only, beginning with 'Students will' or 'Students can'. No teacher advice here.",
+    "Main Session Objective should usually come from the Introduction page rather than becoming a checklist of every task.",
+    "Teacher Focus: one sentence immediately after the objective. It should capture the biggest student mistakes or quality checks the teacher should watch for in this session.",
+    "Components & Software Required: include only software that is genuinely needed in the tasks. Do not list 'Serial Monitor' as software because it is part of Arduino IDE, not separate software.",
+    "Hardware should be grounded in the parts lists from the task pages, especially Task A and Task B where available.",
+    "Do not include a Teacher Highlight Areas section or anything equivalent.",
+    "Task-by-Task Guidance: for each task, give a short outcome and a keyPoints array. Do not return golden nuggets, differentiation, beginner, or extension fields.",
+    "Task titles must follow the format 'Task X - <task title>'.",
+    "Task outcomes must describe the actual student result for that task. Never write 'Complete the activities in...'.",
+    "Key points must be concrete watch-fors, checks, or teacher guidance moves drawn from that task's evidence.",
+    "Most Common Issues: observable student failure patterns or misconceptions paired with the fastest useful session-specific solution.",
+    "Do not leak soldering, wiring, or coding issues into a session unless the supplied evidence clearly shows that work happening in this session.",
     "Prefer observable warning signs, preventative checks, and practical teacher moves over generic pedagogy.",
     "Do not write filler, motivational language, or broad advice that could fit any session.",
     "Do not copy page summaries verbatim.",
@@ -227,20 +216,17 @@ function buildSystemPrompt(): string {
     "If a category is weakly supported, return fewer items instead of padding.",
     "Reject generic lines like 'encourage independence' unless they are anchored to a concrete classroom move in this session.",
     "Use Australian spelling where natural.",
-    "Return ONLY valid JSON with keys: sessionObjective, teacherFocus, software, hardware, highlightAreas, tasks, commonIssues.",
-    "sessionObjective: array of 2-3 strings.",
+    "Return ONLY valid JSON with keys: sessionObjective, teacherFocus, software, hardware, tasks, commonIssues.",
+    "sessionObjective: array containing exactly 1 string.",
     "teacherFocus: one string.",
     "software: array of 0-6 strings.",
-    "hardware: array of 0-10 strings.",
-    "highlightAreas: array of 2-5 strings.",
+    "hardware: array of 0-12 strings.",
     "tasks: array matching the supplied task order where possible.",
     "tasks[].outcome: one short sentence.",
-    "tasks[].reinforce: array of 2-5 concrete teacher reinforcement points.",
-    "tasks[].goldenNuggets: array of 0-3 short, specific teacher insights.",
-    "tasks[].beginner and tasks[].extension: optional short strings only when the task genuinely supports differentiation.",
-    "commonIssues: array of 2-6 objects with keys issue and teacherMove.",
+    "tasks[].keyPoints: array of 2-5 concrete teacher key points.",
+    "commonIssues: array of 2-6 objects with keys issue and solution.",
     "commonIssues[].issue: an observable failure pattern or misconception.",
-    "commonIssues[].teacherMove: the fastest useful teacher intervention or check.",
+    "commonIssues[].solution: the fastest useful teacher intervention or check.",
     "No markdown, no code fences, no extra text."
   ].join(" ");
 }
@@ -283,9 +269,9 @@ function buildUserPrompt(payload: TeacherNotesRequest): string {
           pageTitles: toStringArray(task.pageTitles, 6),
           outcomeHint: toNonEmptyString(task.outcomeHint),
           pageSummaries: toStringArray(task.pageSummaries, 6),
-          reinforceHints: toStringArray(task.reinforceHints, 6),
-          beginnerHint: toNonEmptyString(task.beginnerHint),
-          extensionHint: toNonEmptyString(task.extensionHint)
+          keyPointHints: toStringArray(task.keyPointHints, 6).length > 0
+            ? toStringArray(task.keyPointHints, 6)
+            : toStringArray(task.reinforceHints, 6)
         }))
       : []
   };
@@ -385,35 +371,37 @@ export default {
     const fallbackSoftware = toStringArray(payload.softwareHints, 8);
     const fallbackHardware = toStringArray(payload.hardwareHints, 10);
     const fallbackHighlights = toStringArray(payload.highlightAreaHints, 5);
-    const fallbackIssues = sanitizeCommonIssues(payload.commonIssueHints, 8);
+    const fallbackIssues = sanitizeCommonIssues(payload.commonIssueHints, 8).map((item) => ({
+      issue: item.issue,
+      solution: item.teacherMove
+    }));
 
     const sessionObjective = toStringArray(parsed.sessionObjective, 3);
     const teacherFocus = toNonEmptyString(parsed.teacherFocus);
     const software = toStringArray(parsed.software, 8);
     const hardware = toStringArray(parsed.hardware, 10);
-    const highlightAreas = toStringArray(parsed.highlightAreas, 5);
     const tasks = sanitizeTasks(parsed.tasks, fallbackTaskTitles, 8);
-    const commonIssues = sanitizeCommonIssues(parsed.commonIssues, 8);
+    const commonIssues = sanitizeCommonIssues(parsed.commonIssues, 8).map((item) => ({
+      issue: item.issue,
+      solution: item.teacherMove
+    }));
 
     if (
       sessionObjective.length === 0 &&
       !teacherFocus &&
-      highlightAreas.length === 0 &&
       tasks.length === 0 &&
       commonIssues.length === 0
     ) {
       return errorResponse("Model returned no usable teacher notes content", 502);
     }
 
-    const resolvedHighlights = mergeFallbackLines(highlightAreas, fallbackHighlights, 2, 5);
     const resolvedIssues = mergeFallbackIssues(commonIssues, fallbackIssues, 2, 6);
 
     return jsonResponse({
       sessionObjective,
-      teacherFocus: teacherFocus ?? resolvedHighlights[0],
+      teacherFocus: teacherFocus ?? fallbackHighlights[0],
       software: software.length > 0 ? software : fallbackSoftware,
       hardware: hardware.length > 0 ? hardware : fallbackHardware,
-      highlightAreas: resolvedHighlights,
       tasks,
       commonIssues: resolvedIssues,
       source: {

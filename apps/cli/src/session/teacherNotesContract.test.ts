@@ -110,34 +110,29 @@ test("validateTeacherNotesContent flags cross-domain leakage and generic filler"
   const validation = validateTeacherNotesContent(
     {
       sessionObjective: [
-        "Students will install the required software for the robot.",
-        "Students will practise safe soldering checks before later build work."
+        "Students will install the required software for the robot."
       ],
       teacherFocus: "Encourage independence.",
       software: ["Arduino IDE"],
       hardware: ["Soldering iron"],
-      highlightAreas: [
-        "Check that students can justify what they are changing on Zippy, where it sits on the chassis, and why that choice improves the build.",
-        "Anticipate upload and board-selection friction before students escalate."
-      ],
       tasks: [
         {
-          title: "Session 01: Task A",
+          title: "Task A - Arduino IDE Setup",
           outcome: "Install Arduino IDE and confirm the board and port are ready.",
-          reinforce: ["Check board and port before troubleshooting."],
-          goldenNuggets: [],
-          beginner: undefined,
-          extension: undefined
+          keyPoints: [
+            "Check board and port before troubleshooting.",
+            "Check that students can justify what they are changing on Zippy, where it sits on the chassis, and why that choice improves the build."
+          ]
         }
       ],
       commonIssues: [
         {
           issue: "Students cannot find the correct board or port.",
-          teacherMove: "Run a short board-port checklist before deeper troubleshooting."
+          solution: "Run a short board-port checklist before deeper troubleshooting."
         },
         {
           issue: "Students bridge two solder pads.",
-          teacherMove: "Inspect the joint and remove the bridge before moving on."
+          solution: "Inspect the joint and remove the bridge before moving on."
         }
       ]
     },
@@ -156,26 +151,21 @@ test("validateTeacherNotesContent treats plural concept language as theory leaka
   const validation = validateTeacherNotesContent(
     {
       sessionObjective: [
-        "Students will explain what Nexgen Zippy can do.",
-        "Students will complete Session 01: Task A/B/C."
+        "Students will explain what Nexgen Zippy can do."
       ],
       teacherFocus:
         "Watch for students who are passively observing the demo without understanding the underlying concepts.",
       software: [],
       hardware: [],
-      highlightAreas: [
-        "Pause and ask a student to predict what the robot will do next before continuing the demo.",
-        "Explicitly point out the feature that later build sessions depend on, rather than assuming students noticed it."
-      ],
       tasks: [],
       commonIssues: [
         {
           issue: "Students watch passively and cannot explain what the robot just did.",
-          teacherMove: "Pause the demo and ask a student to predict the next robot behaviour before continuing."
+          solution: "Pause the demo and ask a student to predict the next robot behaviour before continuing."
         },
         {
           issue: "Students remember the exciting feature but miss the underlying purpose or system.",
-          teacherMove: "Stop and point to the exact feature that later build sessions depend on."
+          solution: "Stop and point to the exact feature that later build sessions depend on."
         }
       ]
     },
@@ -184,5 +174,43 @@ test("validateTeacherNotesContent treats plural concept language as theory leaka
 
   assert.ok(
     validation.errors.some((message) => message.includes("Theory / Concepts"))
+  );
+});
+
+test("validateTeacherNotesContent allows theory-style wording when a research task exists", () => {
+  const validation = validateTeacherNotesContent(
+    {
+      sessionObjective: [
+        "Students will identify what each main part does before wiring begins next session."
+      ],
+      teacherFocus:
+        "Watch for students who start wiring early instead of using the research task to explain why each part is needed.",
+      software: [],
+      hardware: ["Motor driver module", "Drive motors"],
+      tasks: [
+        {
+          title: "Task C - A Deeper Understanding of the Parts",
+          outcome: "Students identify what each main part does before wiring begins next session.",
+          keyPoints: [
+            "Use the research questions to expose misconceptions about power, switching, and PCB organisation before the next session."
+          ]
+        }
+      ],
+      commonIssues: [
+        {
+          issue: "Students start wiring during the research task instead of just identifying part roles and connections.",
+          solution: "Keep them on the research questions only and hold off any physical wiring until the next session."
+        },
+        {
+          issue: "Students cannot explain why the motor drivers are needed.",
+          solution: "Have them describe what would happen if the motors were connected directly."
+        }
+      ]
+    },
+    { detectedDomains: ["mechanical_build"], allowTheoryTaskLanguage: true }
+  );
+
+  assert.ok(
+    !validation.errors.some((message) => message.includes("Theory / Concepts"))
   );
 });

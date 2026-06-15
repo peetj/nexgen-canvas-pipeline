@@ -6,9 +6,7 @@ export type TeacherNotesAgentTaskInput = {
   pageTitles?: string[];
   outcomeHint?: string;
   pageSummaries?: string[];
-  reinforceHints?: string[];
-  beginnerHint?: string;
-  extensionHint?: string;
+  keyPointHints?: string[];
 };
 
 export type TeacherNotesAgentSourcePageInput = {
@@ -36,10 +34,7 @@ export type TeacherNotesAgentInput = {
 export type TeacherNotesAgentTaskOutput = {
   title: string;
   outcome?: string;
-  reinforce: string[];
-  goldenNuggets: string[];
-  beginner?: string;
-  extension?: string;
+  keyPoints: string[];
 };
 
 export type TeacherNotesAgentOutput = {
@@ -47,9 +42,8 @@ export type TeacherNotesAgentOutput = {
   teacherFocus?: string;
   software: string[];
   hardware: string[];
-  highlightAreas: string[];
   tasks: TeacherNotesAgentTaskOutput[];
-  commonIssues: Array<{ issue: string; teacherMove: string }>;
+  commonIssues: Array<{ issue: string; solution: string }>;
 };
 
 function normalizeSingleLine(value: unknown): string | undefined {
@@ -86,10 +80,9 @@ function normalizeTaskOutputs(value: unknown, max: number): TeacherNotesAgentTas
     out.push({
       title,
       outcome: normalizeSingleLine(record.outcome),
-      reinforce: normalizeStringArray(record.reinforce, 5),
-      goldenNuggets: normalizeStringArray(record.goldenNuggets, 3),
-      beginner: normalizeSingleLine(record.beginner),
-      extension: normalizeSingleLine(record.extension)
+      keyPoints: normalizeStringArray(record.keyPoints, 5).length > 0
+        ? normalizeStringArray(record.keyPoints, 5)
+        : normalizeStringArray(record.reinforce, 5)
     });
 
     if (out.length >= max) break;
@@ -100,20 +93,21 @@ function normalizeTaskOutputs(value: unknown, max: number): TeacherNotesAgentTas
 function normalizeIssueOutputs(
   value: unknown,
   max: number
-): Array<{ issue: string; teacherMove: string }> {
+): Array<{ issue: string; solution: string }> {
   if (!Array.isArray(value)) return [];
-  const out: Array<{ issue: string; teacherMove: string }> = [];
+  const out: Array<{ issue: string; solution: string }> = [];
   const seen = new Set<string>();
   for (const item of value) {
     if (typeof item !== "object" || item === null) continue;
     const record = item as Record<string, unknown>;
     const issue = normalizeSingleLine(record.issue);
-    const teacherMove = normalizeSingleLine(record.teacherMove);
-    if (!issue || !teacherMove) continue;
+    const solution =
+      normalizeSingleLine(record.solution) ?? normalizeSingleLine(record.teacherMove);
+    if (!issue || !solution) continue;
     const key = issue.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ issue, teacherMove });
+    out.push({ issue, solution });
     if (out.length >= max) break;
   }
   return out;
@@ -148,7 +142,6 @@ export async function generateTeacherNotesFromAgent(
       detectedDomains: input.detectedDomains ?? [],
       softwareHints: input.softwareHints ?? [],
       hardwareHints: input.hardwareHints ?? [],
-      highlightAreaHints: input.highlightAreaHints ?? [],
       commonIssueHints: input.commonIssueHints ?? [],
       taskContexts: input.taskContexts ?? []
     })
@@ -174,7 +167,6 @@ export async function generateTeacherNotesFromAgent(
     teacherFocus?: unknown;
     software?: unknown;
     hardware?: unknown;
-    highlightAreas?: unknown;
     tasks?: unknown;
     commonIssues?: unknown;
   };
@@ -184,7 +176,6 @@ export async function generateTeacherNotesFromAgent(
     teacherFocus: normalizeSingleLine(body.teacherFocus),
     software: normalizeStringArray(body.software, 8),
     hardware: normalizeStringArray(body.hardware, 10),
-    highlightAreas: normalizeStringArray(body.highlightAreas, 6),
     tasks: normalizeTaskOutputs(body.tasks, 8),
     commonIssues: normalizeIssueOutputs(body.commonIssues, 8)
   };
