@@ -2,6 +2,7 @@ node_modules
 dist
 .env
 .DS_Store
+command-history.log
 apps/cli/session-assets/*
 !apps/cli/session-assets/.gitkeep
 !apps/cli/session-assets/README.md
