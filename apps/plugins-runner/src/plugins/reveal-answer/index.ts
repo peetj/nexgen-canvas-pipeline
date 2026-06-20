@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { CanvasPlugin } from "../types.js";
+import type { CanvasPlugin } from "../../types.js";
 
 type RevealMode = "basic" | "enhanced" | "both";
 

@@ -1,5 +1,5 @@
 import type { CanvasModuleItem, CanvasModuleSummary } from "@nexgen/canvas-sdk";
-import type { CanvasPlugin } from "../types.js";
+import type { CanvasPlugin } from "../../types.js";
 
 function normalize(input: string): string {
   return input.trim().toLowerCase();
