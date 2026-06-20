@@ -25,6 +25,8 @@ This repo hosts Canvas automations. It currently generates and uploads Nexgen-st
 - `agent/src/todayIntro`: Cloudflare intro rewrite endpoint for `today-section` (`/today-intro`)
 - `agent/src/taskA`: Cloudflare Task A enrichment endpoint for task pages (`/task-a-content`)
 - `agent/src/teacherNotes`: Cloudflare teacher-notes enrichment endpoint (`/teacher-notes`)
+- `agent/src/lti`: Cloudflare LTI reveal-answer tool (`/lti/*`)
+- `agent/src/reflection`: Cloudflare LTI reflection question tool (`/reflection/*`)
 
 ## Command Summary
 ### Main CLI (`apps/cli/src/cli.ts`)
@@ -508,6 +510,7 @@ npx tsx apps/cli/src/cli.ts course-orchestrate --course-id 21 --from-file apps/c
 Use this for reusable, composable Canvas workflows implemented as plugins.
 Reveal-answer plugin guide: `docs/reveal-answer-plugin.md`.
 Canvas External App (LTI 1.3) guide: `docs/canvas-external-app-reveal-answer.md`.
+Reflection Question LTI guide: `docs/canvas-external-app-reflection-question.md`.
 
 Direct invocation:
 ```bash

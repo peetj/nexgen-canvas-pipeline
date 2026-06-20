@@ -10,7 +10,17 @@ LTI_TOOL_KID = "reveal-answer-key"
 LTI_ALLOWED_ISSUERS = "https://canvas.instructure.com,https://canvas.beta.instructure.com,https://canvas.test.instructure.com"
 LTI_TOOL_TITLE = "Nexgen Reveal Answer"
 LTI_TOOL_DESCRIPTION = "Insert a Canvas-ready reveal answer block."
+REFLECTION_LTI_CLIENT_ID = ""
+REFLECTION_LTI_TITLE = "Nexgen Reflection Question"
+REFLECTION_LTI_DESCRIPTION = "Collect and save student reflections for each task."
 # Recommended: set these via `wrangler secret put` in each environment.
 # LTI_TOOL_PRIVATE_JWK = ""
 # LTI_TOOL_PUBLIC_JWK = ""
 # LTI_STATE_SECRET = ""
+
+# Create and bind a D1 database before deploying the reflection tool.
+# Example:
+# [[d1_databases]]
+# binding = "REFLECTIONS_DB"
+# database_name = "nexgen-reflections"
+# database_id = "<your-d1-database-id>"

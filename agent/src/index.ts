@@ -3,6 +3,7 @@ import taskAAgent from "./taskA/index.js";
 import teacherNotesAgent from "./teacherNotes/index.js";
 import todayIntroAgent from "./todayIntro/index.js";
 import ltiAgent from "./lti/index.js";
+import reflectionAgent from "./reflection/index.js";
 
 type Env = {
   AGENT_API_KEY?: string;
@@ -17,11 +18,28 @@ type Env = {
   LTI_TOOL_BASE_URL?: string;
   LTI_TOOL_TITLE?: string;
   LTI_TOOL_DESCRIPTION?: string;
+  REFLECTION_LTI_CLIENT_ID?: string;
+  REFLECTION_LTI_BASE_URL?: string;
+  REFLECTION_LTI_TITLE?: string;
+  REFLECTION_LTI_DESCRIPTION?: string;
+  REFLECTIONS_DB?: unknown;
 };
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (
+      url.pathname === "/reflection" ||
+      url.pathname === "/reflection/health" ||
+      url.pathname === "/reflection/config" ||
+      url.pathname === "/reflection/login" ||
+      url.pathname === "/reflection/launch" ||
+      url.pathname === "/reflection/respond" ||
+      url.pathname === "/reflection/icon.svg" ||
+      url.pathname === "/.well-known/reflection-jwks.json"
+    ) {
+      return reflectionAgent.fetch(request, env);
+    }
     if (
       url.pathname === "/lti" ||
       url.pathname === "/lti/health" ||
@@ -63,7 +81,7 @@ export default {
         new Response(
           JSON.stringify({
           error:
-            "Not found. Available routes: /generate-quiz, /today-intro, /task-a-content, /teacher-notes, /lti/config"
+            "Not found. Available routes: /generate-quiz, /today-intro, /task-a-content, /teacher-notes, /lti/config, /reflection/config"
         }),
         {
           status: 404,
